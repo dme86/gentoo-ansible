@@ -1,0 +1,349 @@
+##############################################################################
+# PLAY 1 ─ Host phase: partition, filesystems, stage3, bind-mounts …
+##############################################################################
+- name: Prepare disk and bootstrap Gentoo root
+  hosts: gentoo
+  become: true
+  gather_facts: false
+
+  vars:
+    target_disk: /dev/vdb
+    update: false                 # set with -e update=true for rebuilds
+    build_new_gentoo: true        # can be toggled if you only test chroot
+  tasks:
+
+##############################################################################
+# 0)  ARCH Facts ─ gentoo_arch / ~keyword
+##############################################################################
+  - name: Derive Gentoo arch / keyword from ansible_architecture
+    set_fact:
+      gentoo_arch: >-
+        {{  'amd64'  if ansible_architecture in ['x86_64','amd64']
+          else 'arm64' if ansible_architecture in ['aarch64','arm64']
+          else '' }}
+      gentoo_keyword: >-
+        {{  '~amd64' if ansible_architecture in ['x86_64','amd64']
+          else '~arm64' if ansible_architecture in ['aarch64','arm64']
+          else '' }}
+
+  - name: Abort if unsupported architecture
+    fail:
+      msg: "Unsupported architecture: {{ ansible_architecture }}"
+    when: gentoo_arch == ''
+
+##############################################################################
+# 1)  Partition table and partitions
+##############################################################################
+  - name: Create GPT partition table
+    community.general.parted:
+      device: "{{ target_disk }}"
+      label: gpt
+      state: present
+
+  - name: Create EFI System Partition
+    community.general.parted:
+      device: "{{ target_disk }}"
+      number: 1
+      part_start: 1MiB
+      part_end: 513MiB
+      fs_type: fat32
+      flags: [ boot, esp ]
+      state: present
+
+  - name: Create root Btrfs partition
+    community.general.parted:
+      device: "{{ target_disk }}"
+      number: 2
+      part_start: 513MiB
+      part_end: 100%
+      fs_type: btrfs
+      state: present
+
+##############################################################################
+# 2)  Format, mount, create subvolumes
+##############################################################################
+  - block:
+      - name: Format EFI partition
+        community.general.filesystem:
+          dev: "{{ target_disk }}1"
+          fstype: vfat
+          opts: "-F32"
+          force: false
+          label: EFI
+
+      - name: Format root partition as Btrfs
+        community.general.filesystem:
+          dev: "{{ target_disk }}2"
+          fstype: btrfs
+          label: ROOT
+          force: false
+
+      - name: Ensure /mnt/gentoo exists
+        ansible.builtin.file:
+          path: /mnt/gentoo
+          state: directory
+          mode: '0755'
+
+      - name: Mount ROOT temporarily
+        ansible.posix.mount:
+          path: /mnt/gentoo
+          src: "{{ target_disk }}2"
+          fstype: btrfs
+          opts: defaults
+          state: mounted
+
+      - name: Create subvol @
+        command: btrfs subvolume create /mnt/gentoo/@
+        args: { creates: /mnt/gentoo/@ }
+
+      - name: Create subvol @home
+        command: btrfs subvolume create /mnt/gentoo/@home
+        args: { creates: /mnt/gentoo/@home }
+    when: not update
+    become: true
+
+##############################################################################
+# 3)  Re-mount with final options
+##############################################################################
+  - block:
+      - name: Unmount temp root (ignore if absent)
+        ansible.posix.mount:
+          path: /mnt/gentoo
+          state: unmounted
+        failed_when: false
+
+      - name: Mount subvol @ with zstd etc.
+        ansible.posix.mount:
+          path: /mnt/gentoo
+          src: "{{ target_disk }}2"
+          fstype: btrfs
+          opts: noatime,compress=zstd,space_cache=v2,subvol=@
+          state: mounted
+
+      - name: Ensure /mnt/gentoo/boot exists
+        file: { path: /mnt/gentoo/boot, state: directory, mode: '0755' }
+
+      - name: Mount EFI partition
+        ansible.posix.mount:
+          path: /mnt/gentoo/boot
+          src: "{{ target_disk }}1"
+          fstype: vfat
+          opts: defaults
+          state: mounted
+
+      - name: Ensure /mnt/gentoo/home exists
+        file: { path: /mnt/gentoo/home, state: directory, mode: '0755' }
+
+      - name: Mount subvol @home
+        ansible.posix.mount:
+          path: /mnt/gentoo/home
+          src: "{{ target_disk }}2"
+          fstype: btrfs
+          opts: noatime,compress=zstd,space_cache=v2,subvol=@home
+          state: mounted
+    become: true
+
+##############################################################################
+# 4)  Stage3 – auto-detect latest, download
+##############################################################################
+  - name: Fetch latest stage3 manifest
+    uri:
+      url: "https://distfiles.gentoo.org/releases/{{ gentoo_arch }}/autobuilds/current-stage3-{{ gentoo_arch }}-systemd/latest-stage3-{{ gentoo_arch }}-systemd.txt"
+      return_content: yes
+    register: latest_stage3
+
+  - name: Derive stage3 filename & URL
+    set_fact:
+      stage3_file: >-
+        {{ latest_stage3.content.splitlines()
+           | select('match', '^stage3-.*\\.tar\\.xz(\\s|$)')
+           | map('regex_replace', '\\s+.*$', '')
+           | list
+           | first }}
+      stage3_url: "https://distfiles.gentoo.org/releases/{{ gentoo_arch }}/autobuilds/current-stage3-{{ gentoo_arch }}-systemd/{{ stage3_file }}"
+
+  - name: Download stage3 tarball
+    get_url:
+      url: "{{ stage3_url }}"
+      dest: "/mnt/gentoo/{{ stage3_file }}"
+      mode: '0644'
+      force: false
+
+##############################################################################
+# 5)  resolv.conf + bind mounts
+##############################################################################
+  - block:
+      - name: Copy resolv.conf
+        copy:
+          src: /etc/resolv.conf
+          dest: /mnt/gentoo/etc/resolv.conf
+          remote_src: yes
+          mode: '0644'
+
+      - name: Ensure chroot bind-mount dirs
+        file:
+          path: "/mnt/gentoo/{{ item }}"
+          state: directory
+          mode: '0755'
+        loop: [ proc, sys, dev ]
+
+      - name: Mount proc
+        ansible.posix.mount:
+          path: /mnt/gentoo/proc
+          src: proc
+          fstype: proc
+          opts: nosuid,noexec,nodev
+          state: mounted
+
+      - name: Bind-mount /sys (rslave)
+        ansible.posix.mount:
+          path: /mnt/gentoo/sys
+          src: /sys
+          fstype: none
+          opts: rbind,rslave
+          state: mounted
+
+      - name: Bind-mount /dev (rslave)
+        ansible.posix.mount:
+          path: /mnt/gentoo/dev
+          src: /dev
+          fstype: none
+          opts: rbind,rslave
+          state: mounted
+    become: true
+
+##############################################################################
+# 6)  Host-view configs (fstab, package.use, license) into /mnt/gentoo
+##############################################################################
+  - name: Write /etc/fstab in new system
+    copy:
+      dest: /mnt/gentoo/etc/fstab
+      content: |
+        # /etc/fstab — managed by Ansible
+        /dev/vdb1  /boot  vfat  defaults,noatime                                            0 2
+        /dev/vdb2  /      btrfs noatime,compress=zstd,space_cache=v2,subvol=@               0 0
+        /dev/vdb2  /home  btrfs noatime,compress=zstd,space_cache=v2,subvol=@home           0 0
+      mode: '0644'
+
+  - name: Ensure dir-style package.use
+    file: { path: /mnt/gentoo/etc/portage/package.use, state: directory, mode: '0755' }
+
+  - name: Set USE flags for systemd & installkernel
+    copy:
+      dest: /mnt/gentoo/etc/portage/package.use/systemd
+      content: |
+        sys-apps/systemd         boot gnuefi
+        sys-kernel/installkernel systemd-boot dracut
+      mode: '0644'
+
+  - name: Ensure dir-style package.license
+    file: { path: /mnt/gentoo/etc/portage/package.license, state: directory, mode: '0755' }
+
+  - name: Set license for linux-firmware
+    copy:
+      dest: /mnt/gentoo/etc/portage/package.license/linux-firmware
+      content: "sys-kernel/linux-firmware linux-fw-redistributable\n"
+      mode: '0644'
+
+##############################################################################
+# PLAY 2 ─ Inside chroot: install packages, services, bootloader
+##############################################################################
+- name: Configure system inside chroot
+  hosts: chroot
+  become: true
+  gather_facts: false
+
+  vars:
+    base_packages:
+      - sys-fs/btrfs-progs
+      - net-misc/openssh
+      - net-misc/dhcpcd
+      - sys-apps/systemd
+      - sys-boot/efibootmgr
+      - sys-kernel/installkernel
+      - sys-kernel/gentoo-kernel-bin
+      - sys-kernel/linux-firmware
+
+  tasks:
+    - name: env-update + source profile
+      shell: |
+        env-update
+        . /etc/profile
+      changed_when: false
+
+    - name: Install getuto
+      community.general.portage:
+        name: app-portage/getuto
+        state: present
+
+    - name: Run getuto (refresh GNUPG)
+      command: getuto
+      register: getuto_run
+      changed_when: "'refreshed' in getuto_run.stdout.lower() or 'created' in getuto_run.stdout.lower()"
+
+    - name: Install base packages
+      community.general.portage:
+        name: "{{ base_packages }}"
+        state: present
+
+    - name: Enable & start core services
+      service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - sshd
+        - dhcpcd
+        - systemd-timesyncd
+
+    - name: Install / refresh systemd-boot
+      command: bootctl --esp-path=/boot install
+      register: bootctl_install
+      changed_when: "'created' in bootctl_install.stdout.lower() or 'installed' in bootctl_install.stdout.lower() or 'copied' in bootctl_install.stdout.lower()"
+
+    - name: (Draft) efibootmgr entry – verify manually first!
+      command: >
+        efibootmgr -c -d /dev/vdb -p 1 -L "Gentoo" -l '\EFI\systemd\systemd-bootaa64.efi'
+      register: efi_entry
+      changed_when: "'BootCurrent' in efi_entry.stdout"
+      failed_when: efi_entry.rc != 0
+
+##############################################################################
+# PLAY 3 ─ Clean-up: unmount and power-off
+##############################################################################
+- name: Tear-down mounts and power-off
+  hosts: localhost
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Lazy-umount /dev sub-mounts
+      command: umount -l /mnt/gentoo/dev/shm /mnt/gentoo/dev/pts
+      register: um_sub
+      changed_when: um_sub.rc == 0
+      failed_when: false
+
+    - name: Lazy-umount /dev
+      command: umount -l /mnt/gentoo/dev
+      register: um_dev
+      changed_when: um_dev.rc == 0
+      failed_when: false
+
+    - name: Lazy-umount /proc /sys /boot
+      command: umount -l /mnt/gentoo/proc /mnt/gentoo/sys /mnt/gentoo/boot
+      register: um_misc
+      changed_when: um_misc.rc == 0
+      failed_when: false
+
+    - name: Lazy-umount root
+      command: umount -l /mnt/gentoo
+      register: um_root
+      changed_when: um_root.rc == 0
+      failed_when: false
+
+    - name: Halt system (async)
+      shell: shutdown -h now
+      async: 1
+      poll: 0
+      ignore_errors: true
+

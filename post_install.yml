@@ -1,0 +1,272 @@
+---
+##############################################################################
+# Gentoo post-install – install packages, set USE flags, sync, dotfiles …
+##############################################################################
+- name: Gentoo post-install
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: true
+
+##############################################################################
+#  Variables  (all overridable via -e key=value)
+##############################################################################
+  vars:
+    pull:   false      # ansible-playbook … -e pull=true
+    update: false      # ansible-playbook … -e update=true
+
+    user_name: dan
+    home_dir: "/home/{{ user_name }}"
+
+    repos:
+      - { repo: "https://github.com/dme86/dwm.git",         dest: "{{ home_dir }}/.dwm" }
+      - { repo: "https://github.com/dme86/st.git",          dest: "{{ home_dir }}/.st" }
+      - { repo: "https://github.com/dme86/.wallpapers.git", dest: "{{ home_dir }}/.wallpapers" }
+      - { repo: "https://github.com/dme86/neovim.git",      dest: "{{ home_dir }}/.config/nvim" }
+
+    testing_packages:
+      - sys-cluster/k9scli
+      - sys-cluster/kubectl
+      - app-shells/fish
+      - app-shells/fzf
+      - x11-misc/dunst
+
+    stable_packages:
+      - sys-process/htop
+      - app-editors/neovim
+      - x11-terms/alacritty
+      - dev-vcs/git
+      - sys-apps/fd
+      - media-gfx/feh
+      - net-libs/nodejs
+      - app-misc/jq
+      - app-text/tree
+      - sys-apps/bat
+      - sys-fs/ncdu
+      - app-portage/eix
+      - sys-apps/ripgrep
+      - app-admin/awscli
+
+##############################################################################
+#  0)  Initialise diff lists  &  detect user state
+##############################################################################
+  tasks:
+    - name: Init empty diff lists
+      set_fact:
+        missing_testing: []
+        missing_stable:  []
+
+    - name: Ensure user "{{ user_name }}" exists
+      user:
+        name: "{{ user_name }}"
+        shell: /bin/bash
+        create_home: yes
+        state: present
+      register: user_state       # user_state.changed == true → user freshly created
+
+##############################################################################
+#  1)  Detect missing packages
+##############################################################################
+    - name: Query installed testing packages
+      command: "portageq has_version / {{ item }}"
+      loop: "{{ testing_packages }}"
+      register: test_pkg_check
+      changed_when: false
+      failed_when: false
+      loop_control: { label: "{{ item }}" }
+
+    - name: Query installed stable packages
+      command: "portageq has_version / {{ item }}"
+      loop: "{{ stable_packages }}"
+      register: stable_pkg_check
+      changed_when: false
+      failed_when: false
+      loop_control: { label: "{{ item }}" }
+
+    - name: Collect missing testing packages
+      set_fact:
+        missing_testing: >-
+          {{ test_pkg_check.results
+             | selectattr('rc', '!=', 0)
+             | map(attribute='item')
+             | list }}
+
+    - name: Collect missing stable packages
+      set_fact:
+        missing_stable: >-
+          {{ stable_pkg_check.results
+             | selectattr('rc', '!=', 0)
+             | map(attribute='item')
+             | list }}
+
+##############################################################################
+#  2)  Early-exit if absolutely nothing to do
+##############################################################################
+    - name: End play if everything already in place
+      meta: end_play
+      when:
+        - missing_testing | length == 0
+        - missing_stable  | length == 0
+        - not user_state.changed
+        - not pull | bool
+        - not update | bool
+
+##############################################################################
+#  3)  Architecture-dependent facts & Portage binhost
+##############################################################################
+    - name: Derive architecture-specific facts
+      set_fact:
+        gentoo_arch: >-
+          {{ 'amd64' if ansible_architecture in ['x86_64','amd64']
+             else 'arm64' if ansible_architecture in ['aarch64','arm64']
+             else '' }}
+        gentoo_keyword: >-
+          {{ '~amd64' if ansible_architecture in ['x86_64','amd64']
+             else '~arm64' if ansible_architecture in ['aarch64','arm64']
+             else '' }}
+
+    - name: Abort if architecture unsupported
+      fail:
+        msg: "Unsupported architecture: {{ ansible_architecture }}"
+      when: gentoo_arch == ''
+
+    - name: Configure binhost
+      copy:
+        dest: /etc/portage/binrepos.conf/gentoobinhost.conf
+        content: |
+          # Managed by Ansible
+          [gentoobinhost]
+          priority = 9999
+          sync-uri = https://mirror.netcologne.de/gentoo/releases/{{ gentoo_arch }}/binpackages/23.0/{{ gentoo_arch }}/
+        owner: root
+        group: root
+        mode: '0644'
+
+##############################################################################
+#  4)  make.conf baseline  (CHOST adjusted automatically)
+##############################################################################
+    - name: Ensure make.conf baseline
+      copy:
+        dest: /etc/portage/make.conf
+        content: |
+          # Managed by Ansible – edits will be overwritten
+          COMMON_FLAGS="-O2 -pipe"
+          CFLAGS="${COMMON_FLAGS}"
+          CXXFLAGS="${COMMON_FLAGS}"
+          FCFLAGS="${COMMON_FLAGS}"
+          FFLAGS="${COMMON_FLAGS}"
+          BINPKG_FORMAT="gpkg"
+          EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --getbinpkg"
+          CHOST="{{ 'x86_64-pc-linux-gnu' if gentoo_arch == 'amd64' else 'aarch64-unknown-linux-gnu' }}"
+          LC_MESSAGES=C.utf8
+        owner: root
+        group: root
+        mode: '0644'
+
+##############################################################################
+#  5)  Accept-keywords for testing packages
+##############################################################################
+    - name: Ensure dir-style /etc/portage/package.accept_keywords
+      file:
+        path: /etc/portage/package.accept_keywords
+        state: directory
+        mode: 0755
+      when: missing_testing | length > 0
+
+    - name: Add keyword overrides for testing packages
+      lineinfile:
+        path: /etc/portage/package.accept_keywords/cli-tools
+        create: yes
+        regexp: '^{{ item }}\s'
+        line: "{{ item }} {{ gentoo_keyword }}"
+      loop: "{{ missing_testing }}"
+      when: missing_testing | length > 0
+
+##############################################################################
+#  6)  License exception for linux-firmware
+##############################################################################
+    - name: Ensure dir-style package.license
+      file:
+        path: /etc/portage/package.license
+        state: directory
+        mode: 0755
+
+    - name: Allow redistributable firmware license
+      copy:
+        dest: /etc/portage/package.license/linux-firmware
+        content: "sys-kernel/linux-firmware linux-fw-redistributable\n"
+        mode: '0644'
+
+##############################################################################
+#  7)  Install packages that are missing
+##############################################################################
+    - name: Install missing testing packages
+      community.general.portage:
+        name: "{{ missing_testing }}"
+        state: present
+      when: missing_testing | length > 0
+
+    - name: Install missing stable packages
+      community.general.portage:
+        name: "{{ missing_stable }}"
+        state: present
+      when: missing_stable | length > 0
+
+##############################################################################
+#  8)  Configure user home & Git repos
+##############################################################################
+    - name: Ensure {{ user_name }} owns {{ home_dir }}
+      file:
+        path: "{{ home_dir }}"
+        state: directory
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0755'
+
+    - name: Ensure ~/.config exists
+      file:
+        path: "{{ home_dir }}/.config"
+        state: directory
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0755'
+      when: user_state.changed
+
+    # -- Clone on first run ------------------------------------------
+    - name: Clone repositories (initial)
+      git:
+        repo: "{{ item.repo }}"
+        dest: "{{ item.dest }}"
+        version: HEAD
+        update: no
+        clone: yes
+      loop: "{{ repos }}"
+      become_user: "{{ user_name }}"
+      when: user_state.changed
+
+    # -- Pull on explicit request ------------------------------------
+    - name: Pull repositories (update run)
+      git:
+        repo: "{{ item.repo }}"
+        dest: "{{ item.dest }}"
+        update: yes
+        force: no
+      loop: "{{ repos }}"
+      become_user: "{{ user_name }}"
+      when: pull | bool
+
+##############################################################################
+#  9)  Update Portage tree / @world on demand
+##############################################################################
+    - name: Sync Portage tree
+      command: emerge --sync
+      register: sync_out
+      changed_when: "'Number of files fetched' in sync_out.stdout"
+      when: update | bool
+
+    - name: World upgrade
+      command: emerge -uDN @world
+      register: world_out
+      changed_when: "'[ebuild' in world_out.stdout"
+      when: update | bool
+
