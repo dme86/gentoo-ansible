@@ -90,11 +90,14 @@ GENTOO_ROOT_PASSWORD='ein-sicheres-passwort' make install
 ```
 
 Eine vorhandene Zieldatei wird absichtlich nicht überschrieben. Für einen
-kompletten Neubau:
+kompletten Full-Neubau nach einem abgebrochenen Installationsversuch:
 
 ```sh
-./scripts/qemu-install.sh --force
+make install-full-force
 ```
+
+Dabei wird nur das unvollständige qcow2-Image ersetzt; bereits geladene ISOs im
+`.qemu/cache` werden weiterverwendet.
 
 Nützliche Optionen:
 

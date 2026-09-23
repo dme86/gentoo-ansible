@@ -300,15 +300,32 @@
       no_log: true
       changed_when: true
 
+    - name: Create the sudoers drop-in directory
+      ansible.builtin.file:
+        path: "{{ install_root }}/etc/sudoers.d"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Enable sudoers drop-in configuration
+      ansible.builtin.lineinfile:
+        path: "{{ install_root }}/etc/sudoers"
+        regexp: '^[#@]includedir\s+/etc/sudoers\.d\s*$'
+        line: '@includedir /etc/sudoers.d'
+        mode: "0440"
+
     - name: Permit the graphical console user to use sudo
       ansible.builtin.copy:
         dest: "{{ install_root }}/etc/sudoers.d/{{ desktop_user }}"
         content: "{{ desktop_user }} ALL=(ALL:ALL) ALL\n"
+        owner: root
+        group: root
         mode: "0440"
 
     - name: Validate the sudoers configuration
       ansible.builtin.command: >-
-        chroot {{ install_root }} visudo -cf /etc/sudoers.d/{{ desktop_user }}
+        chroot {{ install_root }} visudo -cf /etc/sudoers
       changed_when: false
 
     - name: Set root password
