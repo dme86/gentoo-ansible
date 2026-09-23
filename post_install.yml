@@ -3,8 +3,7 @@
 # Gentoo post-install – install packages, set USE flags, sync, dotfiles …
 ##############################################################################
 - name: Gentoo post-install
-  hosts: localhost
-  connection: local
+  hosts: "{{ post_install_target | default('localhost') }}"
   gather_facts: true
   become: true
 
@@ -16,6 +15,7 @@
     update: false      # ansible-playbook … -e update=true
 
     user_name: dan
+    user_password: dan
     home_dir: "/home/{{ user_name }}"
 
     repos:
@@ -25,6 +25,7 @@
       - { repo: "https://github.com/dme86/neovim.git",      dest: "{{ home_dir }}/.config/nvim" }
 
     testing_packages:
+      - app-emulation/spice-vdagent
       - sys-cluster/k9scli
       - sys-cluster/kubectl
       - app-shells/fish
@@ -32,6 +33,22 @@
       - x11-misc/dunst
 
     stable_packages:
+      # Xorg + the libraries/tools required by the personal dwm/st builds.
+      - x11-base/xorg-server
+      - x11-apps/xinit
+      - x11-apps/setxkbmap
+      - x11-apps/xrandr
+      - x11-misc/dmenu
+      - x11-libs/libX11
+      - x11-libs/libXft
+      - x11-libs/libXinerama
+      - x11-drivers/xf86-input-libinput
+      - media-libs/fontconfig
+      - media-fonts/hack
+      - media-fonts/symbols-nerd-font
+      - media-fonts/dejavu
+      - virtual/pkgconfig
+      - dev-build/make
       - sys-process/htop
       - app-editors/neovim
       - x11-terms/alacritty
@@ -63,6 +80,13 @@
         create_home: yes
         state: present
       register: user_state       # user_state.changed == true → user freshly created
+
+    - name: Set password for {{ user_name }}
+      command: chpasswd
+      args:
+        stdin: "{{ user_name }}:{{ user_password }}"
+      no_log: true
+      changed_when: true
 
 ##############################################################################
 #  1)  Detect missing packages
@@ -100,35 +124,28 @@
              | list }}
 
 ##############################################################################
-#  2)  Early-exit if absolutely nothing to do
-##############################################################################
-    - name: End play if everything already in place
-      meta: end_play
-      when:
-        - missing_testing | length == 0
-        - missing_stable  | length == 0
-        - not user_state.changed
-        - not pull | bool
-        - not update | bool
-
-##############################################################################
-#  3)  Architecture-dependent facts & Portage binhost
+#  2)  Architecture-dependent facts & Portage binhost
 ##############################################################################
     - name: Derive architecture-specific facts
       set_fact:
         gentoo_arch: >-
-          {{ 'amd64' if ansible_architecture in ['x86_64','amd64']
-             else 'arm64' if ansible_architecture in ['aarch64','arm64']
+          {{ 'amd64' if ansible_facts['architecture'] in ['x86_64','amd64']
+             else 'arm64' if ansible_facts['architecture'] in ['aarch64','arm64']
              else '' }}
         gentoo_keyword: >-
-          {{ '~amd64' if ansible_architecture in ['x86_64','amd64']
-             else '~arm64' if ansible_architecture in ['aarch64','arm64']
+          {{ '~amd64' if ansible_facts['architecture'] in ['x86_64','amd64']
+             else '~arm64' if ansible_facts['architecture'] in ['aarch64','arm64']
              else '' }}
 
     - name: Abort if architecture unsupported
       fail:
-        msg: "Unsupported architecture: {{ ansible_architecture }}"
+        msg: "Unsupported architecture: {{ ansible_facts['architecture'] }}"
       when: gentoo_arch == ''
+
+    - name: Record X11 build paths
+      set_fact:
+        x11_include_dir: /usr/include
+        x11_library_dir: /usr/lib64
 
     - name: Configure binhost
       copy:
@@ -143,7 +160,7 @@
         mode: '0644'
 
 ##############################################################################
-#  4)  make.conf baseline  (CHOST adjusted automatically)
+#  3)  make.conf baseline  (CHOST adjusted automatically)
 ##############################################################################
     - name: Ensure make.conf baseline
       copy:
@@ -164,7 +181,7 @@
         mode: '0644'
 
 ##############################################################################
-#  5)  Accept-keywords for testing packages
+#  4)  Accept-keywords for testing packages
 ##############################################################################
     - name: Ensure dir-style /etc/portage/package.accept_keywords
       file:
@@ -183,7 +200,7 @@
       when: missing_testing | length > 0
 
 ##############################################################################
-#  6)  License exception for linux-firmware
+#  5)  License exception for linux-firmware
 ##############################################################################
     - name: Ensure dir-style package.license
       file:
@@ -198,7 +215,7 @@
         mode: '0644'
 
 ##############################################################################
-#  7)  Install packages that are missing
+#  6)  Install packages that are missing
 ##############################################################################
     - name: Install missing testing packages
       community.general.portage:
@@ -212,8 +229,37 @@
         state: present
       when: missing_stable | length > 0
 
+    - name: Map Hack Nerd Font to Gentoo's split font packages
+      copy:
+        dest: /etc/fonts/conf.d/99-hack-nerd-font.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          <?xml version="1.0"?>
+          <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+          <fontconfig>
+            <!-- The dwm repo requests this family. Gentoo ships Hack and the
+                 Nerd Font symbols separately, so compose them via fontconfig. -->
+            <alias binding="strong">
+              <family>Hack Nerd Font</family>
+              <prefer>
+                <family>Hack</family>
+              </prefer>
+              <accept>
+                <family>Symbols Nerd Font Mono</family>
+                <family>Symbols Nerd Font</family>
+              </accept>
+            </alias>
+          </fontconfig>
+      register: hack_nerd_font_alias
+
+    - name: Refresh the fontconfig cache
+      command: fc-cache -f
+      when: hack_nerd_font_alias.changed
+
 ##############################################################################
-#  8)  Configure user home & Git repos
+#  7)  Configure user home & Git repos
 ##############################################################################
     - name: Ensure {{ user_name }} owns {{ home_dir }}
       file:
@@ -230,7 +276,14 @@
         owner: "{{ user_name }}"
         group: "{{ user_name }}"
         mode: '0755'
-      when: user_state.changed
+
+    - name: Ensure ~/.local/bin exists
+      file:
+        path: "{{ home_dir }}/.local/bin"
+        state: directory
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0755'
 
     # -- Clone on first run ------------------------------------------
     - name: Clone repositories (initial)
@@ -242,7 +295,6 @@
         clone: yes
       loop: "{{ repos }}"
       become_user: "{{ user_name }}"
-      when: user_state.changed
 
     # -- Pull on explicit request ------------------------------------
     - name: Pull repositories (update run)
@@ -254,6 +306,143 @@
       loop: "{{ repos }}"
       become_user: "{{ user_name }}"
       when: pull | bool
+
+##############################################################################
+#  8)  Build the personal X11 desktop and create the startx session
+##############################################################################
+    - name: Link the dwm repository into ~/.config
+      file:
+        src: "{{ home_dir }}/.dwm"
+        dest: "{{ home_dir }}/.config/dwm"
+        state: link
+        follow: false
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+
+    - name: Ensure dwm autostart and helper scripts are executable
+      file:
+        path: "{{ item }}"
+        mode: '0755'
+      loop:
+        - "{{ home_dir }}/.dwm/autostart.sh"
+        - "{{ home_dir }}/.dwm/scripts/audio"
+        - "{{ home_dir }}/.dwm/scripts/screenshot"
+
+    - name: Build dwm
+      command:
+        argv:
+          - make
+          - "X11INC={{ x11_include_dir }}"
+          - "X11LIB={{ x11_library_dir }}"
+      args:
+        chdir: "{{ home_dir }}/.dwm"
+      become_user: "{{ user_name }}"
+      register: dwm_build
+      changed_when: "'Nothing to be done' not in dwm_build.stdout"
+
+    - name: Install dwm
+      command:
+        argv:
+          - make
+          - install
+          - "X11INC={{ x11_include_dir }}"
+          - "X11LIB={{ x11_library_dir }}"
+      args:
+        chdir: "{{ home_dir }}/.dwm"
+      register: dwm_install
+      changed_when: true
+
+    - name: Build dwmblocks
+      command: make dwmblocks
+      args:
+        chdir: "{{ home_dir }}/.dwm/dwmblocks-async"
+      become_user: "{{ user_name }}"
+      register: dwmblocks_build
+      changed_when: "'is up to date' not in dwmblocks_build.stdout"
+
+    - name: Install dwmblocks
+      command: make install
+      args:
+        chdir: "{{ home_dir }}/.dwm/dwmblocks-async"
+      changed_when: true
+
+    - name: Build st
+      command:
+        argv:
+          - make
+          - "X11INC={{ x11_include_dir }}"
+          - "X11LIB={{ x11_library_dir }}"
+      args:
+        chdir: "{{ home_dir }}/.st"
+      become_user: "{{ user_name }}"
+      register: st_build
+      changed_when: "'Nothing to be done' not in st_build.stdout"
+
+    - name: Install st
+      command:
+        argv:
+          - make
+          - install
+          - "X11INC={{ x11_include_dir }}"
+          - "X11LIB={{ x11_library_dir }}"
+      args:
+        chdir: "{{ home_dir }}/.st"
+      changed_when: true
+
+    - name: Create the startx session for dwm
+      copy:
+        dest: "{{ home_dir }}/.xinitrc"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          # Managed by Ansible. Keep the system locale English and use a German X keyboard.
+          setxkbmap de
+
+          # UTM/SPICE clipboard integration; harmless when no SPICE channel is present.
+          if command -v spice-vdagent >/dev/null 2>&1; then
+              spice-vdagent &
+          fi
+
+          # Re-render feh's root pixmap whenever UTM changes the X11 geometry.
+          "{{ home_dir }}/.local/bin/watch-wallpaper-resolution" &
+
+          if command -v dbus-run-session >/dev/null 2>&1; then
+              exec dbus-run-session -- dwm
+          fi
+          exec dwm
+
+    - name: Install wallpaper resolution watcher
+      copy:
+        dest: "{{ home_dir }}/.local/bin/watch-wallpaper-resolution"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          # feh creates a root pixmap for the current screen dimensions. Re-run
+          # its saved command after RandR changes those dimensions.
+          previous_geometry=
+
+          while :; do
+              geometry=$(xrandr --current 2>/dev/null |
+                  awk '/^Screen 0:/ { print $8 "x" $10; exit }') || exit 0
+              [ -n "$geometry" ] || exit 0
+
+              if [ -n "$previous_geometry" ] && [ "$geometry" != "$previous_geometry" ]; then
+                  # Debounce the stream of intermediate sizes during live resizing.
+                  sleep 0.25
+                  geometry=$(xrandr --current 2>/dev/null |
+                      awk '/^Screen 0:/ { print $8 "x" $10; exit }') || exit 0
+                  if [ -x "$HOME/.fehbg" ]; then
+                      "$HOME/.fehbg"
+                  fi
+              fi
+
+              previous_geometry=$geometry
+              sleep 0.5
+          done
 
 ##############################################################################
 #  9)  Update Portage tree / @world on demand
@@ -269,4 +458,3 @@
       register: world_out
       changed_when: "'[ebuild' in world_out.stdout"
       when: update | bool
-

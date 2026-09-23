@@ -1,349 +1,396 @@
-##############################################################################
-# PLAY 1 ─ Host phase: partition, filesystems, stage3, bind-mounts …
-##############################################################################
-- name: Prepare disk and bootstrap Gentoo root
-  hosts: gentoo
-  become: true
-  gather_facts: false
+---
+- name: Install Gentoo from the running minimal ISO
+  hosts: gentoo_live
+  gather_facts: true
+  become: false
 
   vars:
-    target_disk: /dev/vdb
-    update: false                 # set with -e update=true for rebuilds
-    build_new_gentoo: true        # can be toggled if you only test chroot
-  tasks:
+    target_disk: /dev/vda
+    install_root: /mnt/gentoo
+    hostname: gentoo
+    timezone: UTC
+    desktop_user: dan
+    desktop_user_password: dan
+    gentoo_mirror: https://distfiles.gentoo.org
+    installer_public_key_path: "{{ playbook_dir }}/.qemu/installer_ed25519.pub"
 
-##############################################################################
-# 0)  ARCH Facts ─ gentoo_arch / ~keyword
-##############################################################################
-  - name: Derive Gentoo arch / keyword from ansible_architecture
-    set_fact:
-      gentoo_arch: >-
-        {{  'amd64'  if ansible_architecture in ['x86_64','amd64']
-          else 'arm64' if ansible_architecture in ['aarch64','arm64']
-          else '' }}
-      gentoo_keyword: >-
-        {{  '~amd64' if ansible_architecture in ['x86_64','amd64']
-          else '~arm64' if ansible_architecture in ['aarch64','arm64']
-          else '' }}
+  pre_tasks:
+    - name: Map the machine architecture to Gentoo
+      ansible.builtin.set_fact:
+        gentoo_arch: >-
+          {{ 'amd64' if ansible_facts.architecture in ['x86_64', 'amd64']
+             else 'arm64' if ansible_facts.architecture in ['aarch64', 'arm64']
+             else '' }}
 
-  - name: Abort if unsupported architecture
-    fail:
-      msg: "Unsupported architecture: {{ ansible_architecture }}"
-    when: gentoo_arch == ''
+    - name: Refuse unsupported architectures
+      ansible.builtin.assert:
+        that:
+          - gentoo_arch | length > 0
+          - target_disk == '/dev/vda'
+          - lookup('env', 'GENTOO_INSTALL_PASSWORD') | length > 0
+        fail_msg: >-
+          Only native amd64/arm64 QEMU guests on /dev/vda are supported and
+          GENTOO_INSTALL_PASSWORD must be set by scripts/qemu-install.sh.
 
-##############################################################################
-# 1)  Partition table and partitions
-##############################################################################
-  - name: Create GPT partition table
-    community.general.parted:
-      device: "{{ target_disk }}"
-      label: gpt
-      state: present
+    - name: Check the target disk exists
+      ansible.builtin.stat:
+        path: "{{ target_disk }}"
+      register: target_disk_stat
 
-  - name: Create EFI System Partition
-    community.general.parted:
-      device: "{{ target_disk }}"
-      number: 1
-      part_start: 1MiB
-      part_end: 513MiB
-      fs_type: fat32
-      flags: [ boot, esp ]
-      state: present
-
-  - name: Create root Btrfs partition
-    community.general.parted:
-      device: "{{ target_disk }}"
-      number: 2
-      part_start: 513MiB
-      part_end: 100%
-      fs_type: btrfs
-      state: present
-
-##############################################################################
-# 2)  Format, mount, create subvolumes
-##############################################################################
-  - block:
-      - name: Format EFI partition
-        community.general.filesystem:
-          dev: "{{ target_disk }}1"
-          fstype: vfat
-          opts: "-F32"
-          force: false
-          label: EFI
-
-      - name: Format root partition as Btrfs
-        community.general.filesystem:
-          dev: "{{ target_disk }}2"
-          fstype: btrfs
-          label: ROOT
-          force: false
-
-      - name: Ensure /mnt/gentoo exists
-        ansible.builtin.file:
-          path: /mnt/gentoo
-          state: directory
-          mode: '0755'
-
-      - name: Mount ROOT temporarily
-        ansible.posix.mount:
-          path: /mnt/gentoo
-          src: "{{ target_disk }}2"
-          fstype: btrfs
-          opts: defaults
-          state: mounted
-
-      - name: Create subvol @
-        command: btrfs subvolume create /mnt/gentoo/@
-        args: { creates: /mnt/gentoo/@ }
-
-      - name: Create subvol @home
-        command: btrfs subvolume create /mnt/gentoo/@home
-        args: { creates: /mnt/gentoo/@home }
-    when: not update
-    become: true
-
-##############################################################################
-# 3)  Re-mount with final options
-##############################################################################
-  - block:
-      - name: Unmount temp root (ignore if absent)
-        ansible.posix.mount:
-          path: /mnt/gentoo
-          state: unmounted
-        failed_when: false
-
-      - name: Mount subvol @ with zstd etc.
-        ansible.posix.mount:
-          path: /mnt/gentoo
-          src: "{{ target_disk }}2"
-          fstype: btrfs
-          opts: noatime,compress=zstd,space_cache=v2,subvol=@
-          state: mounted
-
-      - name: Ensure /mnt/gentoo/boot exists
-        file: { path: /mnt/gentoo/boot, state: directory, mode: '0755' }
-
-      - name: Mount EFI partition
-        ansible.posix.mount:
-          path: /mnt/gentoo/boot
-          src: "{{ target_disk }}1"
-          fstype: vfat
-          opts: defaults
-          state: mounted
-
-      - name: Ensure /mnt/gentoo/home exists
-        file: { path: /mnt/gentoo/home, state: directory, mode: '0755' }
-
-      - name: Mount subvol @home
-        ansible.posix.mount:
-          path: /mnt/gentoo/home
-          src: "{{ target_disk }}2"
-          fstype: btrfs
-          opts: noatime,compress=zstd,space_cache=v2,subvol=@home
-          state: mounted
-    become: true
-
-##############################################################################
-# 4)  Stage3 – auto-detect latest, download
-##############################################################################
-  - name: Fetch latest stage3 manifest
-    uri:
-      url: "https://distfiles.gentoo.org/releases/{{ gentoo_arch }}/autobuilds/current-stage3-{{ gentoo_arch }}-systemd/latest-stage3-{{ gentoo_arch }}-systemd.txt"
-      return_content: yes
-    register: latest_stage3
-
-  - name: Derive stage3 filename & URL
-    set_fact:
-      stage3_file: >-
-        {{ latest_stage3.content.splitlines()
-           | select('match', '^stage3-.*\\.tar\\.xz(\\s|$)')
-           | map('regex_replace', '\\s+.*$', '')
-           | list
-           | first }}
-      stage3_url: "https://distfiles.gentoo.org/releases/{{ gentoo_arch }}/autobuilds/current-stage3-{{ gentoo_arch }}-systemd/{{ stage3_file }}"
-
-  - name: Download stage3 tarball
-    get_url:
-      url: "{{ stage3_url }}"
-      dest: "/mnt/gentoo/{{ stage3_file }}"
-      mode: '0644'
-      force: false
-
-##############################################################################
-# 5)  resolv.conf + bind mounts
-##############################################################################
-  - block:
-      - name: Copy resolv.conf
-        copy:
-          src: /etc/resolv.conf
-          dest: /mnt/gentoo/etc/resolv.conf
-          remote_src: yes
-          mode: '0644'
-
-      - name: Ensure chroot bind-mount dirs
-        file:
-          path: "/mnt/gentoo/{{ item }}"
-          state: directory
-          mode: '0755'
-        loop: [ proc, sys, dev ]
-
-      - name: Mount proc
-        ansible.posix.mount:
-          path: /mnt/gentoo/proc
-          src: proc
-          fstype: proc
-          opts: nosuid,noexec,nodev
-          state: mounted
-
-      - name: Bind-mount /sys (rslave)
-        ansible.posix.mount:
-          path: /mnt/gentoo/sys
-          src: /sys
-          fstype: none
-          opts: rbind,rslave
-          state: mounted
-
-      - name: Bind-mount /dev (rslave)
-        ansible.posix.mount:
-          path: /mnt/gentoo/dev
-          src: /dev
-          fstype: none
-          opts: rbind,rslave
-          state: mounted
-    become: true
-
-##############################################################################
-# 6)  Host-view configs (fstab, package.use, license) into /mnt/gentoo
-##############################################################################
-  - name: Write /etc/fstab in new system
-    copy:
-      dest: /mnt/gentoo/etc/fstab
-      content: |
-        # /etc/fstab — managed by Ansible
-        /dev/vdb1  /boot  vfat  defaults,noatime                                            0 2
-        /dev/vdb2  /      btrfs noatime,compress=zstd,space_cache=v2,subvol=@               0 0
-        /dev/vdb2  /home  btrfs noatime,compress=zstd,space_cache=v2,subvol=@home           0 0
-      mode: '0644'
-
-  - name: Ensure dir-style package.use
-    file: { path: /mnt/gentoo/etc/portage/package.use, state: directory, mode: '0755' }
-
-  - name: Set USE flags for systemd & installkernel
-    copy:
-      dest: /mnt/gentoo/etc/portage/package.use/systemd
-      content: |
-        sys-apps/systemd         boot gnuefi
-        sys-kernel/installkernel systemd-boot dracut
-      mode: '0644'
-
-  - name: Ensure dir-style package.license
-    file: { path: /mnt/gentoo/etc/portage/package.license, state: directory, mode: '0755' }
-
-  - name: Set license for linux-firmware
-    copy:
-      dest: /mnt/gentoo/etc/portage/package.license/linux-firmware
-      content: "sys-kernel/linux-firmware linux-fw-redistributable\n"
-      mode: '0644'
-
-##############################################################################
-# PLAY 2 ─ Inside chroot: install packages, services, bootloader
-##############################################################################
-- name: Configure system inside chroot
-  hosts: chroot
-  become: true
-  gather_facts: false
-
-  vars:
-    base_packages:
-      - sys-fs/btrfs-progs
-      - net-misc/openssh
-      - net-misc/dhcpcd
-      - sys-apps/systemd
-      - sys-boot/efibootmgr
-      - sys-kernel/installkernel
-      - sys-kernel/gentoo-kernel-bin
-      - sys-kernel/linux-firmware
+    - name: Require the QEMU target disk
+      ansible.builtin.assert:
+        that: target_disk_stat.stat.exists
+        fail_msg: "The QEMU disk {{ target_disk }} does not exist."
 
   tasks:
-    - name: env-update + source profile
-      shell: |
-        env-update
-        . /etc/profile
+    - name: Detect an existing partition table
+      ansible.builtin.command: "parted -sm {{ target_disk }} print"
+      register: partition_table
+      changed_when: false
+      failed_when: false
+
+    - name: Partition the fresh QEMU disk
+      ansible.builtin.command: >-
+        parted -s {{ target_disk }} mklabel gpt
+        mkpart ESP fat32 1MiB 513MiB set 1 esp on
+        mkpart ROOT btrfs 513MiB 100%
+      when: partition_table.rc != 0 or ':gpt:' not in partition_table.stdout
+
+    - name: Wait for partition devices
+      ansible.builtin.command: udevadm settle
       changed_when: false
 
-    - name: Install getuto
-      community.general.portage:
-        name: app-portage/getuto
-        state: present
+    - name: Read EFI filesystem type
+      ansible.builtin.command: "blkid -o value -s TYPE {{ target_disk }}1"
+      register: efi_type
+      changed_when: false
+      failed_when: false
 
-    - name: Run getuto (refresh GNUPG)
-      command: getuto
-      register: getuto_run
-      changed_when: "'refreshed' in getuto_run.stdout.lower() or 'created' in getuto_run.stdout.lower()"
+    - name: Format EFI system partition
+      ansible.builtin.command: "mkfs.vfat -F 32 -n EFI {{ target_disk }}1"
+      when: efi_type.stdout != 'vfat'
 
-    - name: Install base packages
-      community.general.portage:
-        name: "{{ base_packages }}"
-        state: present
+    - name: Read root filesystem type
+      ansible.builtin.command: "blkid -o value -s TYPE {{ target_disk }}2"
+      register: root_type
+      changed_when: false
+      failed_when: false
 
-    - name: Enable & start core services
-      service:
-        name: "{{ item }}"
-        enabled: true
-        state: started
+    - name: Format root partition
+      ansible.builtin.command: "mkfs.btrfs -f -L ROOT {{ target_disk }}2"
+      when: root_type.stdout != 'btrfs'
+
+    - name: Create installation mountpoint
+      ansible.builtin.file:
+        path: "{{ install_root }}"
+        state: directory
+        mode: "0755"
+
+    - name: Mount top-level Btrfs filesystem
+      ansible.builtin.command: "mount {{ target_disk }}2 {{ install_root }}"
+      changed_when: true
+
+    - name: Create root subvolume
+      ansible.builtin.command: "btrfs subvolume create {{ install_root }}/@"
+      args:
+        creates: "{{ install_root }}/@"
+
+    - name: Create home subvolume
+      ansible.builtin.command: "btrfs subvolume create {{ install_root }}/@home"
+      args:
+        creates: "{{ install_root }}/@home"
+
+    - name: Unmount top-level Btrfs filesystem
+      ansible.builtin.command: "umount {{ install_root }}"
+      changed_when: true
+
+    - name: Mount root subvolume
+      ansible.builtin.command: >-
+        mount -o noatime,compress=zstd,space_cache=v2,subvol=@
+        {{ target_disk }}2 {{ install_root }}
+      changed_when: true
+
+    - name: Create child mountpoints
+      ansible.builtin.file:
+        path: "{{ install_root }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [boot, home]
+
+    - name: Mount EFI system partition
+      ansible.builtin.command: "mount {{ target_disk }}1 {{ install_root }}/boot"
+      changed_when: true
+
+    - name: Mount home subvolume
+      ansible.builtin.shell: >-
+        mkdir -p {{ install_root }}/home &&
+        mount -o noatime,compress=zstd,space_cache=v2,subvol=@home
+        {{ target_disk }}2 {{ install_root }}/home
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Fetch latest systemd stage3 manifest
+      ansible.builtin.uri:
+        url: "{{ gentoo_mirror }}/releases/{{ gentoo_arch }}/autobuilds/current-stage3-{{ gentoo_arch }}-systemd/latest-stage3-{{ gentoo_arch }}-systemd.txt"
+        return_content: true
+      register: stage3_manifest
+
+    - name: Select stage3 archive
+      ansible.builtin.set_fact:
+        stage3_file: >-
+          {{ stage3_manifest.content.splitlines()
+             | select('match', '^stage3-.*[.]tar[.](xz|zst) [0-9]+$')
+             | map('regex_replace', ' .*$', '') | first }}
+
+    - name: Download stage3 archive and checksum
+      ansible.builtin.get_url:
+        url: "{{ gentoo_mirror }}/releases/{{ gentoo_arch }}/autobuilds/current-stage3-{{ gentoo_arch }}-systemd/{{ item }}"
+        dest: "/tmp/{{ item }}"
+        mode: "0644"
       loop:
-        - sshd
-        - dhcpcd
-        - systemd-timesyncd
+        - "{{ stage3_file }}"
+        - "{{ stage3_file }}.sha256"
 
-    - name: Install / refresh systemd-boot
-      command: bootctl --esp-path=/boot install
-      register: bootctl_install
-      changed_when: "'created' in bootctl_install.stdout.lower() or 'installed' in bootctl_install.stdout.lower() or 'copied' in bootctl_install.stdout.lower()"
+    - name: Verify stage3 SHA-256 checksum
+      ansible.builtin.shell: |
+        set -o pipefail
+        expected=$(awk '/^[0-9a-f]{64}  / { print $1; exit }' "/tmp/{{ stage3_file }}.sha256")
+        printf '%s  %s\n' "$expected" "/tmp/{{ stage3_file }}" | sha256sum -c -
+      args:
+        executable: /bin/bash
+      changed_when: false
 
-    - name: (Draft) efibootmgr entry – verify manually first!
-      command: >
-        efibootmgr -c -d /dev/vdb -p 1 -L "Gentoo" -l '\EFI\systemd\systemd-bootaa64.efi'
-      register: efi_entry
-      changed_when: "'BootCurrent' in efi_entry.stdout"
-      failed_when: efi_entry.rc != 0
+    - name: Extract stage3
+      ansible.builtin.command: >-
+        tar xpf /tmp/{{ stage3_file }} --xattrs-include=*.*
+        --numeric-owner -C {{ install_root }}
+      args:
+        creates: "{{ install_root }}/etc/gentoo-release"
 
-##############################################################################
-# PLAY 3 ─ Clean-up: unmount and power-off
-##############################################################################
-- name: Tear-down mounts and power-off
-  hosts: localhost
-  become: true
-  gather_facts: false
+    - name: Write filesystem table
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/etc/fstab"
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          LABEL=ROOT  /      btrfs  noatime,compress=zstd,space_cache=v2,subvol=@      0 0
+          LABEL=ROOT  /home  btrfs  noatime,compress=zstd,space_cache=v2,subvol=@home  0 0
+          LABEL=EFI   /boot  vfat   defaults,noatime                                   0 2
 
-  tasks:
-    - name: Lazy-umount /dev sub-mounts
-      command: umount -l /mnt/gentoo/dev/shm /mnt/gentoo/dev/pts
-      register: um_sub
-      changed_when: um_sub.rc == 0
-      failed_when: false
+    - name: Configure hostname
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/etc/hostname"
+        content: "{{ hostname }}\n"
+        mode: "0644"
 
-    - name: Lazy-umount /dev
-      command: umount -l /mnt/gentoo/dev
-      register: um_dev
-      changed_when: um_dev.rc == 0
-      failed_when: false
+    - name: Configure timezone
+      ansible.builtin.file:
+        src: "/usr/share/zoneinfo/{{ timezone }}"
+        dest: "{{ install_root }}/etc/localtime"
+        state: link
+        force: true
+        follow: false
 
-    - name: Lazy-umount /proc /sys /boot
-      command: umount -l /mnt/gentoo/proc /mnt/gentoo/sys /mnt/gentoo/boot
-      register: um_misc
-      changed_when: um_misc.rc == 0
-      failed_when: false
+    - name: Configure German console keyboard layout
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/etc/vconsole.conf"
+        mode: "0644"
+        content: |
+          KEYMAP=de
 
-    - name: Lazy-umount root
-      command: umount -l /mnt/gentoo
-      register: um_root
-      changed_when: um_root.rc == 0
-      failed_when: false
+    - name: Create configuration directories
+      ansible.builtin.file:
+        path: "{{ install_root }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - etc/systemd/network
+        - etc/portage/package.use
+        - etc/portage/package.license
+        - etc/ssh/sshd_config.d
 
-    - name: Halt system (async)
-      shell: shutdown -h now
-      async: 1
-      poll: 0
-      ignore_errors: true
+    - name: Configure wired networking
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/etc/systemd/network/20-wired.network"
+        mode: "0644"
+        content: |
+          [Match]
+          Name=en* eth*
 
+          [Network]
+          DHCP=yes
+
+    - name: Configure installkernel USE flags
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/etc/portage/package.use/installkernel"
+        mode: "0644"
+        content: |
+          sys-apps/systemd boot
+          sys-kernel/installkernel systemd-boot dracut
+
+    - name: Configure firmware licence
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/etc/portage/package.license/linux-firmware"
+        mode: "0644"
+        content: "sys-kernel/linux-firmware linux-fw-redistributable\n"
+
+    - name: Configure installed kernel command line
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/etc/kernel/cmdline"
+        mode: "0644"
+        content: "console=tty0 root=LABEL=ROOT rootfstype=btrfs rootflags=subvol=@ rw\n"
+
+    - name: Prefer Gentoo binary packages
+      ansible.builtin.blockinfile:
+        path: "{{ install_root }}/etc/portage/make.conf"
+        marker: "# {mark} ANSIBLE QEMU INSTALL"
+        block: |
+          FEATURES="${FEATURES} getbinpkg"
+          EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --getbinpkg=y --usepkg=y"
+
+    - name: Copy DNS configuration into chroot
+      ansible.builtin.copy:
+        src: /etc/resolv.conf
+        dest: "{{ install_root }}/etc/resolv.conf"
+        remote_src: true
+        mode: "0644"
+
+    - name: Create chroot mountpoints
+      ansible.builtin.file:
+        path: "{{ install_root }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [proc, sys, dev, run]
+
+    - name: Mount chroot pseudo filesystems
+      ansible.builtin.shell: |
+        mount -t proc proc "{{ install_root }}/proc"
+        mount --rbind /sys "{{ install_root }}/sys"
+        mount --make-rslave "{{ install_root }}/sys"
+        mount --rbind /dev "{{ install_root }}/dev"
+        mount --make-rslave "{{ install_root }}/dev"
+        mount --bind /run "{{ install_root }}/run"
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Refresh the Portage repository snapshot
+      ansible.builtin.command: >-
+        chroot {{ install_root }} /bin/bash -lc 'emerge-webrsync'
+      changed_when: true
+
+    - name: Install kernel, boot and networking packages
+      ansible.builtin.command: >-
+        chroot {{ install_root }} /bin/bash -lc
+        'emerge --noreplace sys-kernel/gentoo-kernel-bin sys-kernel/installkernel
+        sys-kernel/linux-firmware sys-fs/btrfs-progs net-misc/openssh app-admin/sudo'
+      changed_when: true
+
+    - name: Create the graphical console user
+      ansible.builtin.command: >-
+        chroot {{ install_root }} useradd --create-home --shell /bin/bash {{ desktop_user }}
+      args:
+        creates: "{{ install_root }}/home/{{ desktop_user }}"
+
+    - name: Set the graphical console user password
+      ansible.builtin.command: "chroot {{ install_root }} chpasswd"
+      args:
+        stdin: "{{ desktop_user }}:{{ desktop_user_password }}"
+      no_log: true
+      changed_when: true
+
+    - name: Permit the graphical console user to use sudo
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/etc/sudoers.d/{{ desktop_user }}"
+        content: "{{ desktop_user }} ALL=(ALL:ALL) ALL\n"
+        mode: "0440"
+
+    - name: Validate the sudoers configuration
+      ansible.builtin.command: >-
+        chroot {{ install_root }} visudo -cf /etc/sudoers.d/{{ desktop_user }}
+      changed_when: false
+
+    - name: Set root password
+      ansible.builtin.shell: >-
+        printf '%s:%s\n' root "$GENTOO_INSTALL_PASSWORD" |
+        chroot {{ install_root }} chpasswd
+      environment:
+        GENTOO_INSTALL_PASSWORD: "{{ lookup('env', 'GENTOO_INSTALL_PASSWORD') }}"
+      no_log: true
+      changed_when: true
+
+    - name: Create root SSH directory
+      ansible.builtin.file:
+        path: "{{ install_root }}/root/.ssh"
+        state: directory
+        mode: "0700"
+
+    - name: Install root SSH key
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/root/.ssh/authorized_keys"
+        content: "{{ lookup('file', installer_public_key_path) }}\n"
+        mode: "0600"
+
+    - name: Allow root login with keys only
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/etc/ssh/sshd_config.d/10-installer.conf"
+        content: |
+          PermitRootLogin prohibit-password
+          PasswordAuthentication no
+        mode: "0644"
+
+    - name: Enable installed services
+      ansible.builtin.command: >-
+        chroot {{ install_root }} systemctl enable
+        sshd systemd-networkd systemd-resolved systemd-timesyncd
+      changed_when: true
+
+    - name: Link resolv.conf to systemd-resolved
+      ansible.builtin.command: >-
+        ln -sfn ../run/systemd/resolve/stub-resolv.conf
+        {{ install_root }}/etc/resolv.conf
+      changed_when: true
+
+    - name: Install systemd-boot without firmware variables
+      ansible.builtin.command: >-
+        chroot {{ install_root }} bootctl --esp-path=/boot install --no-variables
+      changed_when: true
+
+    - name: Configure systemd-boot defaults
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/boot/loader/loader.conf"
+        mode: "0644"
+        content: |
+          default gentoo-*
+          timeout 1
+          editor no
+
+    - name: Create graphical getty override directory
+      ansible.builtin.file:
+        path: "{{ install_root }}/etc/systemd/system/getty@tty1.service.d"
+        state: directory
+        mode: "0755"
+
+    - name: Clear the graphical virtual terminal before each login prompt
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/etc/systemd/system/getty@tty1.service.d/clear-screen.conf"
+        mode: "0644"
+        content: |
+          [Service]
+          ExecStart=
+          ExecStart=-/usr/bin/agetty --noreset - ${TERM}
+
+    - name: Initialize machine ID on first boot
+      ansible.builtin.copy:
+        dest: "{{ install_root }}/etc/machine-id"
+        content: ""
+        mode: "0444"
+
+  post_tasks:
+    - name: Unmount chroot and installed filesystems
+      ansible.builtin.shell: |
+        umount -R "{{ install_root }}" || umount -lR "{{ install_root }}"
+      args:
+        executable: /bin/bash
+      changed_when: true

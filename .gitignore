@@ -1,0 +1,19 @@
+# Generated VM state, downloads, credentials and logs
+.qemu/
+*.qcow2
+*.img
+*.iso
+*.iso.part
+*.utm/
+*.log
+*.pid
+*.retry
+installer_ed25519
+installer_ed25519.pub
+
+# Local editor/OS files
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.py[cod]
