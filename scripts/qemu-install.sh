@@ -156,31 +156,9 @@ if [ -z "$LIVE_BOOT_ARGS" ]; then
   exit 1
 fi
 
-find_firmware() {
-  if [ -n "${QEMU_EFI:-}" ]; then
-    [ -f "$QEMU_EFI" ] && { printf '%s\n' "$QEMU_EFI"; return; }
-    return 1
-  fi
-  qemu_prefix=$(cd "$(dirname "$(command -v "qemu-system-$QEMU_ARCH")")/.." && pwd)
-  if [ "$QEMU_ARCH" = aarch64 ]; then
-    candidates="$qemu_prefix/share/qemu/edk2-aarch64-code.fd
-/opt/homebrew/share/qemu/edk2-aarch64-code.fd
-/usr/local/share/qemu/edk2-aarch64-code.fd
-/usr/share/AAVMF/AAVMF_CODE.fd
-/usr/share/edk2/aarch64/QEMU_EFI.fd"
-  else
-    candidates="$qemu_prefix/share/qemu/edk2-x86_64-code.fd
-/opt/homebrew/share/qemu/edk2-x86_64-code.fd
-/usr/local/share/qemu/edk2-x86_64-code.fd
-/usr/share/OVMF/OVMF_CODE.fd
-/usr/share/edk2/ovmf/OVMF_CODE.fd"
-  fi
-  printf '%s\n' "$candidates" | while IFS= read -r candidate; do
-    if [ -f "$candidate" ]; then printf '%s\n' "$candidate"; break; fi
-  done
-}
+source "$PROJECT_DIR/scripts/qemu-firmware.sh"
 
-EFI_FIRMWARE=$(find_firmware || true)
+EFI_FIRMWARE=$(find_qemu_firmware "$QEMU_ARCH" || true)
 if [ -z "$EFI_FIRMWARE" ]; then
   printf 'No UEFI firmware found. Set QEMU_EFI to an edk2/OVMF code image.\n' >&2
   exit 1

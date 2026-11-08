@@ -14,12 +14,12 @@ case $(uname -m) in
   arm64|aarch64)
     QEMU_SYSTEM=qemu-system-aarch64
     MACHINE=virt
-    DEFAULT_EFI=/opt/homebrew/share/qemu/edk2-aarch64-code.fd
+    QEMU_ARCH=aarch64
     ;;
   x86_64|amd64)
     QEMU_SYSTEM=qemu-system-x86_64
     MACHINE=q35
-    DEFAULT_EFI=/opt/homebrew/share/qemu/edk2-x86_64-code.fd
+    QEMU_ARCH=x86_64
     ;;
   *)
     printf 'Unsupported host architecture: %s\n' "$(uname -m)" >&2
@@ -27,7 +27,8 @@ case $(uname -m) in
     ;;
 esac
 
-EFI_FIRMWARE=${QEMU_EFI:-$DEFAULT_EFI}
+source "$PROJECT_DIR/scripts/qemu-firmware.sh"
+EFI_FIRMWARE=$(find_qemu_firmware "$QEMU_ARCH" || true)
 if ! command -v "$QEMU_SYSTEM" >/dev/null 2>&1 || [ ! -f "$EFI_FIRMWARE" ]; then
   printf 'QEMU or UEFI firmware is unavailable. Set QEMU_EFI if necessary.\n' >&2
   exit 1

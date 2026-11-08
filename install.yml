@@ -3,6 +3,9 @@
   hosts: gentoo_live
   gather_facts: true
   become: false
+  environment:
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
 
   vars:
     target_disk: /dev/vda
@@ -248,6 +251,7 @@
         block: |
           FEATURES="${FEATURES} getbinpkg"
           EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --getbinpkg=y --usepkg=y"
+          PORT_LOGDIR="/var/log/portage"
 
     - name: Copy DNS configuration into chroot
       ansible.builtin.copy:
@@ -281,11 +285,36 @@
       changed_when: true
 
     - name: Install kernel, boot and networking packages
-      ansible.builtin.command: >-
-        chroot {{ install_root }} /bin/bash -lc
-        'emerge --noreplace sys-kernel/gentoo-kernel-bin sys-kernel/installkernel
-        sys-kernel/linux-firmware sys-fs/btrfs-progs net-misc/openssh app-admin/sudo'
-      changed_when: true
+      block:
+        - name: Emerge the base system packages
+          ansible.builtin.command: >-
+            chroot {{ install_root }} /bin/bash -lc
+            'emerge --noreplace sys-kernel/gentoo-kernel-bin sys-kernel/installkernel
+            sys-kernel/linux-firmware sys-fs/btrfs-progs net-misc/openssh app-admin/sudo'
+          changed_when: true
+      rescue:
+        - name: Find failed package build logs
+          ansible.builtin.find:
+            paths: "{{ install_root }}/var/log/portage"
+            patterns: '*.log'
+            recurse: true
+          register: failed_build_logs
+
+        - name: Save build logs on the host
+          ansible.builtin.fetch:
+            src: "{{ item.path }}"
+            dest: "{{ playbook_dir }}/.qemu/diagnostics/"
+          loop: "{{ failed_build_logs.files }}"
+          loop_control:
+            label: "{{ item.path }}"
+
+        - name: Report package installation failure
+          ansible.builtin.fail:
+            msg: "Package installation failed. Build logs: {{ playbook_dir }}/.qemu/diagnostics/"
+      always:
+        - name: Flush installed files and logs to disk
+          ansible.builtin.command: sync
+          changed_when: false
 
     - name: Create the graphical console user
       ansible.builtin.command: >-

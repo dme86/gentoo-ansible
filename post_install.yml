@@ -6,6 +6,9 @@
   hosts: "{{ post_install_target | default('localhost') }}"
   gather_facts: true
   become: true
+  environment:
+    LANG: C.UTF-8
+    LC_ALL: C.UTF-8
 
 ##############################################################################
 #  Variables  (all overridable via -e key=value)
@@ -18,31 +21,28 @@
     user_password: dan
     home_dir: "/home/{{ user_name }}"
 
+    anvil_version: "47270baa475181950939722372b333f09f7a749e"
+
     repos:
-      - { repo: "https://github.com/dme86/dwm.git",         dest: "{{ home_dir }}/.dwm" }
-      - { repo: "https://github.com/dme86/st.git",          dest: "{{ home_dir }}/.st" }
       - { repo: "https://github.com/dme86/.wallpapers.git", dest: "{{ home_dir }}/.wallpapers" }
       - { repo: "https://github.com/dme86/neovim.git",      dest: "{{ home_dir }}/.config/nvim" }
 
     testing_packages:
-      - app-emulation/spice-vdagent
       - sys-cluster/k9scli
       - sys-cluster/kubectl
       - app-shells/fish
       - app-shells/fzf
-      - x11-misc/dunst
 
     stable_packages:
-      # Xorg + the libraries/tools required by the personal dwm/st builds.
-      - x11-base/xorg-server
-      - x11-apps/xinit
-      - x11-apps/setxkbmap
-      - x11-apps/xrandr
-      - x11-misc/dmenu
-      - x11-libs/libX11
-      - x11-libs/libXft
-      - x11-libs/libXinerama
-      - x11-drivers/xf86-input-libinput
+      - '>=dev-lang/rust-bin-1.87'
+      - dev-libs/wayland
+      - dev-libs/libinput
+      - sys-auth/seatd
+      - sys-apps/dbus
+      - media-libs/mesa
+      - x11-libs/libdrm
+      - x11-libs/libxkbcommon
+      - x11-misc/xkeyboard-config
       - media-libs/fontconfig
       - media-fonts/hack
       - media-fonts/symbols-nerd-font
@@ -54,7 +54,6 @@
       - x11-terms/alacritty
       - dev-vcs/git
       - sys-apps/fd
-      - media-gfx/feh
       - net-libs/nodejs
       - app-misc/jq
       - app-text/tree
@@ -142,11 +141,6 @@
         msg: "Unsupported architecture: {{ ansible_facts['architecture'] }}"
       when: gentoo_arch == ''
 
-    - name: Record X11 build paths
-      set_fact:
-        x11_include_dir: /usr/include
-        x11_library_dir: /usr/lib64
-
     - name: Configure binhost
       copy:
         dest: /etc/portage/binrepos.conf/gentoobinhost.conf
@@ -168,10 +162,13 @@
         content: |
           # Managed by Ansible – edits will be overwritten
           COMMON_FLAGS="-O2 -pipe"
+          PORT_LOGDIR="/var/log/portage"
           CFLAGS="${COMMON_FLAGS}"
           CXXFLAGS="${COMMON_FLAGS}"
           FCFLAGS="${COMMON_FLAGS}"
           FFLAGS="${COMMON_FLAGS}"
+          USE="wayland"
+          VIDEO_CARDS="virgl"
           BINPKG_FORMAT="gpkg"
           EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --getbinpkg"
           CHOST="{{ 'x86_64-pc-linux-gnu' if gentoo_arch == 'amd64' else 'aarch64-unknown-linux-gnu' }}"
@@ -217,6 +214,22 @@
 ##############################################################################
 #  6)  Install packages that are missing
 ##############################################################################
+    - name: Ensure package USE directory
+      file:
+        path: /etc/portage/package.use
+        state: directory
+        mode: '0755'
+
+    - name: Configure Wayland rendering and logind session access
+      copy:
+        dest: /etc/portage/package.use/anvil
+        mode: '0644'
+        content: |
+          sys-auth/seatd systemd -elogind
+          media-libs/mesa egl gbm llvm wayland
+          x11-libs/libxkbcommon wayland
+          x11-terms/alacritty wayland -X
+
     - name: Install missing testing packages
       community.general.portage:
         name: "{{ missing_testing }}"
@@ -229,6 +242,19 @@
         state: present
       when: missing_stable | length > 0
 
+    - name: Reconcile desktop packages with their required USE flags
+      command:
+        argv:
+          - emerge
+          - --update
+          - --newuse
+          - --deep
+          - sys-auth/seatd
+          - media-libs/mesa
+          - x11-libs/libxkbcommon
+          - x11-terms/alacritty
+      changed_when: true
+
     - name: Map Hack Nerd Font to Gentoo's split font packages
       copy:
         dest: /etc/fonts/conf.d/99-hack-nerd-font.conf
@@ -239,8 +265,6 @@
           <?xml version="1.0"?>
           <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
           <fontconfig>
-            <!-- The dwm repo requests this family. Gentoo ships Hack and the
-                 Nerd Font symbols separately, so compose them via fontconfig. -->
             <alias binding="strong">
               <family>Hack Nerd Font</family>
               <prefer>
@@ -307,142 +331,113 @@
       become_user: "{{ user_name }}"
       when: pull | bool
 
-##############################################################################
-#  8)  Build the personal X11 desktop and create the startx session
-##############################################################################
-    - name: Link the dwm repository into ~/.config
-      file:
-        src: "{{ home_dir }}/.dwm"
-        dest: "{{ home_dir }}/.config/dwm"
-        state: link
-        follow: false
-        owner: "{{ user_name }}"
-        group: "{{ user_name }}"
+    - name: Check out the pinned Anvil source
+      git:
+        repo: https://github.com/dme86/anvil.git
+        dest: "{{ home_dir }}/.local/src/anvil"
+        version: "{{ anvil_version }}"
+        update: yes
+      become_user: "{{ user_name }}"
 
-    - name: Ensure dwm autostart and helper scripts are executable
-      file:
-        path: "{{ item }}"
+    - name: Build Anvil and anvilctl
+      command: cargo build --release --locked
+      args:
+        chdir: "{{ home_dir }}/.local/src/anvil"
+      environment:
+        CARGO_BUILD_JOBS: "2"
+      become_user: "{{ user_name }}"
+      changed_when: true
+
+    - name: Install Anvil binaries
+      copy:
+        src: "{{ home_dir }}/.local/src/anvil/target/release/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        remote_src: true
+        owner: root
+        group: root
         mode: '0755'
       loop:
-        - "{{ home_dir }}/.dwm/autostart.sh"
-        - "{{ home_dir }}/.dwm/scripts/audio"
-        - "{{ home_dir }}/.dwm/scripts/screenshot"
+        - anvil
+        - anvilctl
 
-    - name: Build dwm
-      command:
-        argv:
-          - make
-          - "X11INC={{ x11_include_dir }}"
-          - "X11LIB={{ x11_library_dir }}"
-      args:
-        chdir: "{{ home_dir }}/.dwm"
-      become_user: "{{ user_name }}"
-      register: dwm_build
-      changed_when: "'Nothing to be done' not in dwm_build.stdout"
-
-    - name: Install dwm
-      command:
-        argv:
-          - make
-          - install
-          - "X11INC={{ x11_include_dir }}"
-          - "X11LIB={{ x11_library_dir }}"
-      args:
-        chdir: "{{ home_dir }}/.dwm"
-      register: dwm_install
-      changed_when: true
-
-    - name: Build dwmblocks
-      command: make dwmblocks
-      args:
-        chdir: "{{ home_dir }}/.dwm/dwmblocks-async"
-      become_user: "{{ user_name }}"
-      register: dwmblocks_build
-      changed_when: "'is up to date' not in dwmblocks_build.stdout"
-
-    - name: Install dwmblocks
-      command: make install
-      args:
-        chdir: "{{ home_dir }}/.dwm/dwmblocks-async"
-      changed_when: true
-
-    - name: Build st
-      command:
-        argv:
-          - make
-          - "X11INC={{ x11_include_dir }}"
-          - "X11LIB={{ x11_library_dir }}"
-      args:
-        chdir: "{{ home_dir }}/.st"
-      become_user: "{{ user_name }}"
-      register: st_build
-      changed_when: "'Nothing to be done' not in st_build.stdout"
-
-    - name: Install st
-      command:
-        argv:
-          - make
-          - install
-          - "X11INC={{ x11_include_dir }}"
-          - "X11LIB={{ x11_library_dir }}"
-      args:
-        chdir: "{{ home_dir }}/.st"
-      changed_when: true
-
-    - name: Create the startx session for dwm
-      copy:
-        dest: "{{ home_dir }}/.xinitrc"
+    - name: Ensure Anvil configuration directory exists
+      file:
+        path: "{{ home_dir }}/.config/anvil"
+        state: directory
         owner: "{{ user_name }}"
         group: "{{ user_name }}"
         mode: '0755'
-        content: |
-          #!/bin/sh
-          # Managed by Ansible. Keep the system locale English and use a German X keyboard.
-          setxkbmap de
 
-          # UTM/SPICE clipboard integration; harmless when no SPICE channel is present.
-          if command -v spice-vdagent >/dev/null 2>&1; then
-              spice-vdagent &
-          fi
-
-          # Re-render feh's root pixmap whenever UTM changes the X11 geometry.
-          "{{ home_dir }}/.local/bin/watch-wallpaper-resolution" &
-
-          if command -v dbus-run-session >/dev/null 2>&1; then
-              exec dbus-run-session -- dwm
-          fi
-          exec dwm
-
-    - name: Install wallpaper resolution watcher
+    - name: Initialise Anvil configuration without replacing user settings
       copy:
-        dest: "{{ home_dir }}/.local/bin/watch-wallpaper-resolution"
+        src: "{{ home_dir }}/.local/src/anvil/config.toml"
+        dest: "{{ home_dir }}/.config/anvil/config.toml"
+        remote_src: true
+        force: false
         owner: "{{ user_name }}"
         group: "{{ user_name }}"
+        mode: '0644'
+
+    - name: Configure German keyboard layout
+      command: /usr/local/bin/anvilctl config set input.keyboard.layout de
+      environment:
+        HOME: "{{ home_dir }}"
+      become_user: "{{ user_name }}"
+      changed_when: true
+
+    - name: Validate installed Anvil configuration
+      command: /usr/local/bin/anvilctl config validate
+      environment:
+        HOME: "{{ home_dir }}"
+      become_user: "{{ user_name }}"
+      changed_when: false
+
+    - name: Install Anvil session launcher
+      copy:
+        dest: /usr/local/bin/start-anvil
+        owner: root
+        group: root
         mode: '0755'
         content: |
           #!/bin/sh
-          # feh creates a root pixmap for the current screen dimensions. Re-run
-          # its saved command after RandR changes those dimensions.
-          previous_geometry=
+          set -eu
+          : "${XDG_RUNTIME_DIR:?Log in locally before starting Anvil}"
+          export XDG_SESSION_TYPE=wayland
+          export XDG_CURRENT_DESKTOP=anvil
+          export XDG_SESSION_DESKTOP=anvil
+          export LIBSEAT_BACKEND=logind
+          exec dbus-run-session -- /usr/local/bin/anvil
 
-          while :; do
-              geometry=$(xrandr --current 2>/dev/null |
-                  awk '/^Screen 0:/ { print $8 "x" $10; exit }') || exit 0
-              [ -n "$geometry" ] || exit 0
+    - name: Ensure Wayland session directory exists
+      file:
+        path: /usr/share/wayland-sessions
+        state: directory
+        mode: '0755'
 
-              if [ -n "$previous_geometry" ] && [ "$geometry" != "$previous_geometry" ]; then
-                  # Debounce the stream of intermediate sizes during live resizing.
-                  sleep 0.25
-                  geometry=$(xrandr --current 2>/dev/null |
-                      awk '/^Screen 0:/ { print $8 "x" $10; exit }') || exit 0
-                  if [ -x "$HOME/.fehbg" ]; then
-                      "$HOME/.fehbg"
-                  fi
-              fi
+    - name: Register Anvil Wayland session
+      copy:
+        dest: /usr/share/wayland-sessions/anvil.desktop
+        mode: '0644'
+        content: |
+          [Desktop Entry]
+          Name=Anvil
+          Comment=Anvil Wayland compositor
+          Exec=/usr/local/bin/start-anvil
+          Type=Application
+          DesktopNames=anvil
 
-              previous_geometry=$geometry
-              sleep 0.5
-          done
+    - name: Start Anvil after a local login on tty1
+      blockinfile:
+        path: "{{ home_dir }}/.bash_profile"
+        create: true
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0644'
+        marker: "# {mark} ANSIBLE ANVIL SESSION"
+        block: |
+          if [ -z "${SSH_CONNECTION:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && [ "$(tty)" = /dev/tty1 ]; then
+              /usr/local/bin/start-anvil
+          fi
 
 ##############################################################################
 #  9)  Update Portage tree / @world on demand
