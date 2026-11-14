@@ -255,3 +255,9 @@ entfällt `make run-graphical`.
 
 Der rst-Quellstand enthält eine eingecheckte `Cargo.lock`, damit der Build
 mit `--locked` auch auf einer frischen Installation funktioniert.
+
+Lokale Änderungen im verwalteten rst-Build-Verzeichnis werden vor einem Update
+mit `git stash push --include-untracked` gesichert. Sie lassen sich in der VM
+mit `git -C ~/.local/src/rst stash list` anzeigen und bei Bedarf gezielt
+wiederherstellen. Die Sicherung wird nicht automatisch auf den neuen
+Quellstand angewendet. Ignorierte Build-Dateien bleiben bestehen.
