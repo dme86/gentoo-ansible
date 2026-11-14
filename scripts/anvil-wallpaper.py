@@ -7,7 +7,7 @@ import sys
 
 root = Path.home() / ".wallpapers" / "files"
 images = sorted(path for path in root.rglob("*")
-                if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"})
+                if path.is_file() and path.stat().st_size > 0 and path.suffix.lower() in {".png", ".jpg", ".jpeg"})
 if not images:
     print(f"anvil-wallpaper: no images in {root}", file=sys.stderr)
     sys.exit(0)
