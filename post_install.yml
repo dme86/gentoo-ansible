@@ -21,6 +21,7 @@
     user_password: dan
     home_dir: "/home/{{ user_name }}"
 
+    rst_version: "9cfde626c157be234b508c4d02604a7ac6c386fe"
     anvil_version: "47270baa475181950939722372b333f09f7a749e"
 
     repos:
@@ -51,7 +52,6 @@
       - dev-build/make
       - sys-process/htop
       - app-editors/neovim
-      - x11-terms/alacritty
       - dev-vcs/git
       - sys-apps/fd
       - net-libs/nodejs
@@ -228,7 +228,6 @@
           sys-auth/seatd systemd -elogind
           media-libs/mesa egl gbm llvm wayland
           x11-libs/libxkbcommon wayland
-          x11-terms/alacritty wayland -X
 
     - name: Install missing testing packages
       community.general.portage:
@@ -252,7 +251,6 @@
           - sys-auth/seatd
           - media-libs/mesa
           - x11-libs/libxkbcommon
-          - x11-terms/alacritty
       changed_when: true
 
     - name: Map Hack Nerd Font to Gentoo's split font packages
@@ -331,6 +329,32 @@
       become_user: "{{ user_name }}"
       when: pull | bool
 
+    - name: Check out the pinned rst source
+      git:
+        repo: https://github.com/dme86/rst.git
+        dest: "{{ home_dir }}/.local/src/rst"
+        version: "{{ rst_version }}"
+        update: yes
+      become_user: "{{ user_name }}"
+
+    - name: Build rst
+      command: cargo build --release --locked
+      args:
+        chdir: "{{ home_dir }}/.local/src/rst"
+      environment:
+        CARGO_BUILD_JOBS: "2"
+      become_user: "{{ user_name }}"
+      changed_when: true
+
+    - name: Install rst terminal
+      copy:
+        src: "{{ home_dir }}/.local/src/rst/target/release/rst"
+        dest: /usr/local/bin/rst
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0755'
+
     - name: Check out the pinned Anvil source
       git:
         repo: https://github.com/dme86/anvil.git
@@ -380,6 +404,23 @@
 
     - name: Configure German keyboard layout
       command: /usr/local/bin/anvilctl config set input.keyboard.layout de
+      environment:
+        HOME: "{{ home_dir }}"
+      become_user: "{{ user_name }}"
+      changed_when: true
+
+    - name: Configure rst as terminal and disable all window gaps
+      command:
+        argv:
+          - /usr/local/bin/anvilctl
+          - config
+          - set
+          - "{{ item.key }}"
+          - "{{ item.value }}"
+      loop:
+        - { key: general.terminal, value: /usr/local/bin/rst }
+        - { key: layout.gap, value: "0" }
+        - { key: layout.outer_gap, value: "0" }
       environment:
         HOME: "{{ home_dir }}"
       become_user: "{{ user_name }}"

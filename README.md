@@ -28,7 +28,7 @@ make install
 `make install` installiert zuerst die benötigte Ansible-Collection und
 führt danach den gesamten unbeaufsichtigten Ablauf aus: aktuelles Gentoo-ISO
 laden und prüfen, qcow2 erzeugen, Gentoo installieren, testweise von der Platte
-booten sowie Wayland, Anvil, Alacritty, Fonts und die persönlichen Repositories
+booten sowie Wayland, Anvil, rst, Fonts und die persönlichen Repositories
 einrichten. Je nach Host und Verfügbarkeit von Binärpaketen dauert das deutlich
 länger als eine reine Basisinstallation.
 
@@ -118,10 +118,18 @@ Rust, Wayland, Mesa mit EGL/GBM und Software-Rendering, libinput und libseat
 mit systemd-logind werden vorher installiert. Der Build verwendet zwei Jobs,
 um den Speicherbedarf in der VM zu begrenzen.
 
-Anvil bringt Leiste, Launcher und Fensterübersicht mit. Alacritty ist das
-Terminal. Die Konfiguration liegt unter `~/.config/anvil/config.toml`;
+Wayland, Anvil und unser Terminal [rst](https://github.com/dme86/rst) werden
+bei `make install` standardmäßig installiert. rst wird ebenfalls mit
+`cargo build --release --locked` gebaut und als `/usr/local/bin/rst` installiert;
+`rst_version` legt den Quellstand auf Commit
+`9cfde626c157be234b508c4d02604a7ac6c386fe` fest.
+
+Anvil bringt Leiste, Launcher und Fensterübersicht mit. rst ist das
+Standardterminal. Fensterabstände sind standardmäßig deaktiviert:
+`layout.gap = 0` und `layout.outer_gap = 0`. Die Konfiguration liegt unter `~/.config/anvil/config.toml`;
 die Tastaturbelegung ist Deutsch. Bestehende Anvil-Einstellungen bleiben
-bis auf die verwaltete Tastaturbelegung erhalten. Neovim und Wallpapers
+bis auf die verwaltete Tastaturbelegung, das Standardterminal und die
+Fensterabstände erhalten. Neovim und Wallpapers
 werden weiterhin ausgecheckt; ein Wallpaper-Dienst wird nicht gestartet.
 
 Nach dem Boot auf der lokalen Konsole anmelden:
@@ -134,7 +142,7 @@ Password: dan
 Auf tty1 startet danach automatisch Anvil als Benutzer `dan` in einer
 D-Bus-Session. Andere Konsolen und SSH bleiben normale Shells. Ein manueller
 Start aus einer freien lokalen Konsole ist mit `start-anvil` möglich.
-Es gibt keinen automatischen Login. `Super+Return` öffnet Alacritty,
+Es gibt keinen automatischen Login. `Super+Return` öffnet rst,
 `Super+p` den Launcher und `Super+Tab` die Fensterübersicht.
 XWayland ist in diesem Build nicht aktiviert.
 
