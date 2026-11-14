@@ -113,7 +113,7 @@ Nützliche Optionen:
 Die Desktop-Konfiguration baut [Anvil](https://github.com/dme86/anvil) und
 `anvilctl` direkt in der Gentoo-VM mit `cargo build --release --locked`.
 Der Quellstand ist über `anvil_version` in `post_install.yml` auf Commit
-`47270baa475181950939722372b333f09f7a749e` festgelegt (Version 0.6.4).
+`66b20753830bbaaec0d60c83f9e7fad11a6ef1f7` festgelegt (Version 0.6.9).
 Rust, Wayland, Mesa mit EGL/GBM und Software-Rendering, libinput und libseat
 mit systemd-logind sowie `x11-themes/xcursor-themes` werden vorher installiert. Der Build verwendet zwei Jobs,
 um den Speicherbedarf in der VM zu begrenzen.
@@ -122,7 +122,7 @@ Wayland, Anvil und unser Terminal [rst](https://github.com/dme86/rst) werden
 bei `make install` standardmäßig installiert. rst wird ebenfalls mit
 `cargo build --release --locked` gebaut und als `/usr/local/bin/rst` installiert;
 `rst_version` legt den Quellstand auf Commit
-`adf6368514fef75ea482e86805c50437757db67b` fest.
+`a12cd343cca8c38d586d59e216e1083938b737e7` fest.
 
 Anvil bringt Leiste, Launcher und Fensterübersicht mit. rst ist das
 Standardterminal. Fensterabstände sind standardmäßig deaktiviert:
@@ -132,15 +132,15 @@ bis auf die verwaltete Tastaturbelegung, das Standardterminal und die
 Fensterabstände erhalten. Neovim und Wallpapers
 werden weiterhin ausgecheckt; ein Wallpaper-Dienst wird nicht gestartet.
 
-Nach dem Boot auf der lokalen Konsole anmelden:
+Nach dem Boot bei tuigreet mit Benutzer `dan` und Passwort `dan` anmelden:
 
 ```text
 gentoo login: dan
 Password: dan
 ```
 
-Auf tty1 startet danach automatisch Anvil als Benutzer `dan` in einer
-D-Bus-Session. Andere Konsolen und SSH bleiben normale Shells. Ein manueller
+Auf tty1 zeigt greetd den minimalen tuigreet-Anmeldebildschirm. Nach der
+Anmeldung startet Anvil als Benutzer `dan` in einer D-Bus-Session. Andere Konsolen und SSH bleiben normale Shells. Ein manueller
 Start aus einer freien lokalen Konsole ist mit `start-anvil` möglich.
 Es gibt keinen automatischen Login. `Super+Return` öffnet rst,
 `Super+p` den Launcher und `Super+Tab` die Fensterübersicht.
@@ -159,7 +159,8 @@ make run-graphical
 ```
 
 Der Starter öffnet eine QEMU-Fensterkonsole mit Tastatur und Maus, aber keinen
-automatischen Display-Manager. Nach dem Login auf tty1 startet Anvil. Die serielle Konsole
+zusätzlichen grafischen Display-Manager. greetd mit tuigreet übernimmt die
+Anmeldung auf tty1 und startet Anvil. Die serielle Konsole
 wird dort bewusst abgeschaltet, damit nur ein Login-Prompt angezeigt wird.
 `Ctrl`+`Alt`+`G` gibt einen gefangenen Mauszeiger frei. Die VM wird im Gast mit
 `poweroff` sauber beendet.
@@ -270,3 +271,21 @@ Der Sitzungsstarter verwendet standardmäßig das Cursor-Theme `whiteglass`.
 Ein vorhandenes `XCURSOR_THEME` bleibt erhalten. Das Theme-Paket stellt den
 für den Anvil-Start benötigten Mauszeiger `left_ptr` bereit.
 Der Starter ergänzt außerdem Gentoos Cursor-Suchpfad `/usr/share/cursors/xorg-x11`.
+
+## Minimaler Greeter: greetd und tuigreet
+
+`make install` richtet standardmäßig greetd mit tuigreet auf tty1 ein.
+Es gibt keinen automatischen Login. Nach der Anmeldung startet `start-anvil`;
+beim Beenden von Anvil erscheint wieder der Greeter. Andere Konsolen und SSH
+bleiben verfügbar. Der frühere Anvil-Autostart in `.bash_profile` wird entfernt.
+
+greetd wird über Portage installiert (auf ARM64 mit passender Keyword-Freigabe).
+tuigreet wird aus https://github.com/tuigreet/tuigreet am festgelegten Commit
+`4e3a0054a51ab35242d63d5b47e503d314808c52` mit `--locked` gebaut.
+Die Konfiguration liegt unter `/etc/greetd/config.toml`, der Benutzercache unter
+`/var/cache/tuigreet`. tty1-getty wird maskiert, damit beide Anmeldungen nicht
+miteinander konkurrieren. Änderungen aktivieren den Dienst für den nächsten
+Boot, ohne die aktuelle Sitzung zu beenden.
+
+Für eine bestehende VM: `make post-install` ausführen und anschließend in der VM
+`sudo reboot`. Auf dem Host ersetzt dieser Ablauf das vorhandene Image nicht.

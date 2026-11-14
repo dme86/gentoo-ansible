@@ -21,21 +21,23 @@
     user_password: dan
     home_dir: "/home/{{ user_name }}"
 
-    rst_version: "adf6368514fef75ea482e86805c50437757db67b"
-    anvil_version: "47270baa475181950939722372b333f09f7a749e"
+    rst_version: "a12cd343cca8c38d586d59e216e1083938b737e7"
+    tuigreet_version: "4e3a0054a51ab35242d63d5b47e503d314808c52"
+    anvil_version: "66b20753830bbaaec0d60c83f9e7fad11a6ef1f7"
 
     repos:
       - { repo: "https://github.com/dme86/.wallpapers.git", dest: "{{ home_dir }}/.wallpapers" }
       - { repo: "https://github.com/dme86/neovim.git",      dest: "{{ home_dir }}/.config/nvim" }
 
     testing_packages:
+      - gui-libs/greetd
       - sys-cluster/k9scli
       - sys-cluster/kubectl
       - app-shells/fish
       - app-shells/fzf
 
     stable_packages:
-      - '>=dev-lang/rust-bin-1.87'
+      - '>=dev-lang/rust-bin-1.95'
       - dev-libs/wayland
       - dev-libs/libinput
       - sys-auth/seatd
@@ -538,18 +540,72 @@
           Type=Application
           DesktopNames=anvil
 
-    - name: Start Anvil after a local login on tty1
+    - name: Check out the pinned tuigreet source
+      git:
+        repo: https://github.com/tuigreet/tuigreet.git
+        dest: "{{ home_dir }}/.local/src/tuigreet"
+        version: "{{ tuigreet_version }}"
+        update: true
+      become_user: "{{ user_name }}"
+
+    - name: Build tuigreet
+      command: cargo build --release --locked --bin tuigreet
+      args:
+        chdir: "{{ home_dir }}/.local/src/tuigreet"
+      environment:
+        CARGO_BUILD_JOBS: "2"
+      become_user: "{{ user_name }}"
+      changed_when: true
+
+    - name: Install tuigreet
+      copy:
+        src: "{{ home_dir }}/.local/src/tuigreet/target/release/tuigreet"
+        dest: /usr/local/bin/tuigreet
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Ensure tuigreet cache directory exists
+      file:
+        path: /var/cache/tuigreet
+        state: directory
+        owner: greetd
+        group: greetd
+        mode: '0755'
+
+    - name: Configure greetd with tuigreet and Anvil
+      copy:
+        dest: /etc/greetd/config.toml
+        owner: root
+        group: root
+        mode: '0644'
+        backup: true
+        content: |
+          [terminal]
+          vt = 1
+
+          [default_session]
+          command = "/usr/local/bin/tuigreet --time --remember --greeting 'Gentoo' --cmd /usr/local/bin/start-anvil"
+          user = "greetd"
+
+    - name: Remove the former shell-based Anvil autostart
       blockinfile:
         path: "{{ home_dir }}/.bash_profile"
-        create: true
-        owner: "{{ user_name }}"
-        group: "{{ user_name }}"
-        mode: '0644'
         marker: "# {mark} ANSIBLE ANVIL SESSION"
-        block: |
-          if [ -z "${SSH_CONNECTION:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && [ "$(tty)" = /dev/tty1 ]; then
-              /usr/local/bin/start-anvil
-          fi
+        state: absent
+
+    - name: Reserve tty1 for greetd without interrupting the running session
+      systemd_service:
+        name: getty@tty1.service
+        enabled: false
+        masked: true
+
+    - name: Enable greetd for the next boot without interrupting the running session
+      systemd_service:
+        name: greetd.service
+        enabled: true
+        daemon_reload: true
 
 ##############################################################################
 #  9)  Update Portage tree / @world on demand
