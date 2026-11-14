@@ -130,7 +130,8 @@ Standardterminal. Fensterabstände sind standardmäßig deaktiviert:
 die Tastaturbelegung ist Deutsch. Bestehende Anvil-Einstellungen bleiben
 bis auf die verwaltete Tastaturbelegung, das Standardterminal und die
 Fensterabstände erhalten. Neovim und Wallpapers
-werden weiterhin ausgecheckt; ein Wallpaper-Dienst wird nicht gestartet.
+werden weiterhin ausgecheckt. Anvil startet pro Sitzung `swaybg` mit einem
+zufällig gewählten Wallpaper aus `~/.wallpapers/files`.
 
 Nach dem Boot bei tuigreet mit Benutzer `dan` und Passwort `dan` anmelden:
 
@@ -289,3 +290,19 @@ Boot, ohne die aktuelle Sitzung zu beenden.
 
 Für eine bestehende VM: `make post-install` ausführen und anschließend in der VM
 `sudo reboot`. Auf dem Host ersetzt dieser Ablauf das vorhandene Image nicht.
+
+## Zufälliges Wallpaper pro Desktop-Sitzung
+
+Anvil startet über `general.startup` den Helfer `/usr/local/bin/anvil-wallpaper`.
+Er wählt bei jeder neuen Sitzung zufällig eine PNG- oder JPEG-Datei aus
+`~/.wallpapers/files` und ersetzt sich durch `swaybg --mode fill`. Das Bild
+füllt den Bildschirm mit beibehaltenem Seitenverhältnis; Ränder können dabei
+beschnitten werden. Alle Ausgänge verwenden dasselbe Bild. greetd bleibt
+für die Anmeldung zuständig; der Greeter erhält kein Wallpaper.
+
+Das Wallpaper-Repository https://github.com/dme86/.wallpapers wird bereits
+bei der Installation geklont. `make post-install` installiert `swaybg` und
+richtet den Startup-Eintrag ein, ohne andere Startup-Kommandos zu ersetzen.
+Neue Bilder werden beim nächsten Sitzungsstart berücksichtigt. Mit `git -C ~/.wallpapers pull --ff-only` in der VM lässt sich die
+Bildersammlung aktualisieren.
+Fehlen Bilder, beendet sich der Helfer ohne die Anmeldung zu blockieren.

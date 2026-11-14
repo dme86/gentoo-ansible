@@ -39,6 +39,7 @@
     stable_packages:
       - '>=dev-lang/rust-bin-1.95'
       - dev-libs/wayland
+      - gui-apps/swaybg
       - dev-libs/libinput
       - sys-auth/seatd
       - sys-apps/dbus
@@ -231,6 +232,8 @@
           sys-auth/seatd systemd -elogind
           media-libs/mesa egl gbm llvm wayland
           x11-libs/libxkbcommon wayland
+          gui-apps/swaybg gdk-pixbuf
+          x11-libs/gdk-pixbuf jpeg
 
     - name: Install missing testing packages
       community.general.portage:
@@ -254,6 +257,7 @@
           - sys-auth/seatd
           - media-libs/mesa
           - x11-libs/libxkbcommon
+          - gui-apps/swaybg
       changed_when: true
 
     - name: Map Hack Nerd Font to Gentoo's split font packages
@@ -495,6 +499,43 @@
       environment:
         HOME: "{{ home_dir }}"
       become_user: "{{ user_name }}"
+      changed_when: true
+
+    - name: Install the random session wallpaper launcher
+      copy:
+        src: "{{ playbook_dir }}/scripts/anvil-wallpaper.py"
+        dest: /usr/local/bin/anvil-wallpaper
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Read existing Anvil startup commands
+      command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json, pathlib, tomllib
+            config = tomllib.loads(pathlib.Path.home().joinpath('.config/anvil/config.toml').read_text())
+            print(json.dumps(config.get('general', {}).get('startup', [])))
+      environment:
+        HOME: "{{ home_dir }}"
+      become_user: "{{ user_name }}"
+      register: anvil_startup_commands
+      changed_when: false
+
+    - name: Enable random wallpaper without replacing other startup commands
+      command:
+        argv:
+          - /usr/local/bin/anvilctl
+          - config
+          - set
+          - general.startup
+          - "{{ ((anvil_startup_commands.stdout | from_json) + ['/usr/local/bin/anvil-wallpaper']) | unique | list | to_json }}"
+      environment:
+        HOME: "{{ home_dir }}"
+      become_user: "{{ user_name }}"
+      when: "'/usr/local/bin/anvil-wallpaper' not in (anvil_startup_commands.stdout | from_json)"
       changed_when: true
 
     - name: Validate installed Anvil configuration
