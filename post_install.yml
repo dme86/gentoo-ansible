@@ -512,6 +512,7 @@
           #!/bin/sh
           set -eu
           : "${XDG_RUNTIME_DIR:?Log in locally before starting Anvil}"
+          export XCURSOR_PATH="/usr/share/cursors/xorg-x11:${XCURSOR_PATH:-/usr/share/icons:/usr/share/pixmaps}"
           export XCURSOR_THEME="${XCURSOR_THEME:-whiteglass}"
           export XDG_SESSION_TYPE=wayland
           export XDG_CURRENT_DESKTOP=anvil

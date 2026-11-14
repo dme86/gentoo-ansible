@@ -269,3 +269,4 @@ Auch die bisherigen Git-Stashes bleiben dadurch in der Sicherung erhalten.
 Der Sitzungsstarter verwendet standardmäßig das Cursor-Theme `whiteglass`.
 Ein vorhandenes `XCURSOR_THEME` bleibt erhalten. Das Theme-Paket stellt den
 für den Anvil-Start benötigten Mauszeiger `left_ptr` bereit.
+Der Starter ergänzt außerdem Gentoos Cursor-Suchpfad `/usr/share/cursors/xorg-x11`.
