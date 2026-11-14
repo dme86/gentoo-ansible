@@ -21,7 +21,7 @@
     user_password: dan
     home_dir: "/home/{{ user_name }}"
 
-    rst_version: "9cfde626c157be234b508c4d02604a7ac6c386fe"
+    rst_version: "adf6368514fef75ea482e86805c50437757db67b"
     anvil_version: "47270baa475181950939722372b333f09f7a749e"
 
     repos:

@@ -122,7 +122,7 @@ Wayland, Anvil und unser Terminal [rst](https://github.com/dme86/rst) werden
 bei `make install` standardmäßig installiert. rst wird ebenfalls mit
 `cargo build --release --locked` gebaut und als `/usr/local/bin/rst` installiert;
 `rst_version` legt den Quellstand auf Commit
-`9cfde626c157be234b508c4d02604a7ac6c386fe` fest.
+`adf6368514fef75ea482e86805c50437757db67b` fest.
 
 Anvil bringt Leiste, Launcher und Fensterübersicht mit. rst ist das
 Standardterminal. Fensterabstände sind standardmäßig deaktiviert:
@@ -227,3 +227,31 @@ QEMU_EFI=/pfad/zu/edk2-aarch64-code.fd make install
 
 Der Installer akzeptiert als Zielgerät absichtlich nur `/dev/vda`; dadurch kann
 das Playbook nicht versehentlich eine beliebige Host-Festplatte überschreiben.
+
+## Nachinstallation nach einem Abbruch fortsetzen
+
+Wenn die Basisinstallation abgeschlossen ist und `post_install.yml` abbricht,
+bleibt das installierte System in `.qemu/gentoo.qcow2` erhalten. Nicht erneut
+mit `--force` installieren: Das würde das vorhandene Image ersetzen.
+
+Im Repository zuerst `git pull --ff-only` ausführen. Die vorhandene VM starten:
+
+```sh
+make run-graphical
+```
+
+Nach dem Boot in einem zweiten Terminal im selben Repository die
+Nachinstallation erneut ausführen:
+
+```sh
+make post-install
+```
+
+Der Befehl verwendet das beim Installieren erzeugte `.qemu/inventory.ini`
+und den zugehörigen SSH-Schlüssel. Die VM muss über den dort eingetragenen
+SSH-Port erreichbar sein (standardmäßig 2222; bei abweichendem Port mit
+`SSH_PORT=2223 make run-graphical` starten). Falls die VM bereits läuft,
+entfällt `make run-graphical`.
+
+Der rst-Quellstand enthält eine eingecheckte `Cargo.lock`, damit der Build
+mit `--locked` auch auf einer frischen Installation funktioniert.
