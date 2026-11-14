@@ -115,7 +115,7 @@ Die Desktop-Konfiguration baut [Anvil](https://github.com/dme86/anvil) und
 Der Quellstand ist über `anvil_version` in `post_install.yml` auf Commit
 `47270baa475181950939722372b333f09f7a749e` festgelegt (Version 0.6.4).
 Rust, Wayland, Mesa mit EGL/GBM und Software-Rendering, libinput und libseat
-mit systemd-logind werden vorher installiert. Der Build verwendet zwei Jobs,
+mit systemd-logind sowie `x11-themes/xcursor-themes` werden vorher installiert. Der Build verwendet zwei Jobs,
 um den Speicherbedarf in der VM zu begrenzen.
 
 Wayland, Anvil und unser Terminal [rst](https://github.com/dme86/rst) werden
@@ -265,3 +265,7 @@ Quellstand angewendet. Ignorierte Build-Dateien bleiben bestehen.
 Bei beschädigten Git-Objekten oder Referenzen sichert der Installer das gesamte
 rst-Verzeichnis unter `~/.local/src/rst-recovery-*/checkout` und klont frisch.
 Auch die bisherigen Git-Stashes bleiben dadurch in der Sicherung erhalten.
+
+Der Sitzungsstarter verwendet standardmäßig das Cursor-Theme `whiteglass`.
+Ein vorhandenes `XCURSOR_THEME` bleibt erhalten. Das Theme-Paket stellt den
+für den Anvil-Start benötigten Mauszeiger `left_ptr` bereit.

@@ -48,6 +48,7 @@
       - media-fonts/hack
       - media-fonts/symbols-nerd-font
       - media-fonts/dejavu
+      - x11-themes/xcursor-themes
       - virtual/pkgconfig
       - dev-build/make
       - sys-process/htop
@@ -511,6 +512,7 @@
           #!/bin/sh
           set -eu
           : "${XDG_RUNTIME_DIR:?Log in locally before starting Anvil}"
+          export XCURSOR_THEME="${XCURSOR_THEME:-whiteglass}"
           export XDG_SESSION_TYPE=wayland
           export XDG_CURRENT_DESKTOP=anvil
           export XDG_SESSION_DESKTOP=anvil
