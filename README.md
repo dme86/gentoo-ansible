@@ -261,3 +261,7 @@ mit `git stash push --include-untracked` gesichert. Sie lassen sich in der VM
 mit `git -C ~/.local/src/rst stash list` anzeigen und bei Bedarf gezielt
 wiederherstellen. Die Sicherung wird nicht automatisch auf den neuen
 Quellstand angewendet. Ignorierte Build-Dateien bleiben bestehen.
+
+Bei beschädigten Git-Objekten oder Referenzen sichert der Installer das gesamte
+rst-Verzeichnis unter `~/.local/src/rst-recovery-*/checkout` und klont frisch.
+Auch die bisherigen Git-Stashes bleiben dadurch in der Sicherung erhalten.

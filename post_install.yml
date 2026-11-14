@@ -334,6 +334,43 @@
         path: "{{ home_dir }}/.local/src/rst/.git"
       register: rst_checkout
 
+    - name: Check rst repository integrity
+      command: git fsck --connectivity-only
+      args:
+        chdir: "{{ home_dir }}/.local/src/rst"
+      become_user: "{{ user_name }}"
+      register: rst_integrity
+      changed_when: false
+      failed_when: false
+      when: rst_checkout.stat.exists
+
+    - name: Allocate a backup directory for a damaged rst checkout
+      tempfile:
+        state: directory
+        path: "{{ home_dir }}/.local/src"
+        prefix: rst-recovery-
+      become_user: "{{ user_name }}"
+      register: rst_recovery
+      when:
+        - rst_checkout.stat.exists
+        - rst_integrity.rc | default(0) != 0
+
+    - name: Preserve the damaged rst checkout before cloning again
+      command:
+        argv:
+          - mv
+          - "{{ home_dir }}/.local/src/rst"
+          - "{{ rst_recovery.path }}/checkout"
+      when:
+        - rst_checkout.stat.exists
+        - rst_integrity.rc | default(0) != 0
+      changed_when: true
+
+    - name: Refresh rst checkout state after recovery
+      stat:
+        path: "{{ home_dir }}/.local/src/rst/.git"
+      register: rst_checkout
+
     - name: Inspect local changes in the rst build checkout
       command: git status --porcelain --untracked-files=all
       args:
