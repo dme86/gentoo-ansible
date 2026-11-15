@@ -32,7 +32,7 @@
          else '' }}
 
     tuigreet_version: "4e3a0054a51ab35242d63d5b47e503d314808c52"
-    anvil_version: "707ca89e2f2897f4735feb35229e836f439b761f"
+    anvil_version: "fe97d4cb428d63671e140f2d69c3e4ff92af1208"
 
     repos:
       - { repo: "https://github.com/dme86/.wallpapers.git", dest: "{{ home_dir }}/.wallpapers" }
@@ -468,6 +468,25 @@
       loop:
         - anvil
         - anvilctl
+
+    - name: Install Anvil-aware Neofetch configuration helper
+      copy:
+        src: "{{ home_dir }}/.local/src/anvil/scripts/configure-neofetch.py"
+        dest: /usr/local/bin/anvil-neofetch-configure
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configure Neofetch to identify Anvil sessions without replacing user settings
+      command:
+        argv:
+          - /usr/local/bin/anvil-neofetch-configure
+          - --config
+          - "{{ home_dir }}/.config/neofetch/config.conf"
+      become_user: "{{ user_name }}"
+      register: anvil_neofetch_configuration
+      changed_when: "anvil_neofetch_configuration.stdout.startswith('Configured Neofetch ')"
 
     - name: Ensure Anvil configuration directory exists
       file:

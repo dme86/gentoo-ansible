@@ -113,7 +113,13 @@ Nützliche Optionen:
 Die Desktop-Konfiguration baut [Anvil](https://github.com/dme86/anvil) und
 `anvilctl` direkt in der Gentoo-VM mit `cargo build --release --locked`.
 Der Quellstand ist über `anvil_version` in `post_install.yml` auf Commit
-`707ca89e2f2897f4735feb35229e836f439b761f` festgelegt (Version 0.6.9).
+`fe97d4cb428d63671e140f2d69c3e4ff92af1208` festgelegt (Version 0.7.0 mit
+Neofetch-Integration). Der Verweis berücksichtigt die bereinigte Anvil-Historie.
+
+Die Nachinstallation richtet außerdem Neofetch so ein, dass es eine Anvil-Sitzung
+korrekt als `WM: Anvil` erkennt. Vorhandene Einstellungen bleiben erhalten; die
+ursprüngliche Konfiguration wird einmal gesichert. Der Hook greift nur innerhalb
+einer Anvil-Wayland-Sitzung, damit `swaybg` nicht mehr als Sway fehlinterpretiert wird.
 Rust, Wayland, Mesa mit EGL/GBM und Software-Rendering, libinput und libseat
 mit systemd-logind sowie `x11-themes/xcursor-themes` werden vorher installiert. Der Build verwendet zwei Jobs,
 um den Speicherbedarf in der VM zu begrenzen.
