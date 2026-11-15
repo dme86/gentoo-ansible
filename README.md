@@ -113,7 +113,7 @@ Nützliche Optionen:
 Die Desktop-Konfiguration baut [Anvil](https://github.com/dme86/anvil) und
 `anvilctl` direkt in der Gentoo-VM mit `cargo build --release --locked`.
 Der Quellstand ist über `anvil_version` in `post_install.yml` auf Commit
-`b4c723fb56df9152ca0b88f3fa2b8580c078af7c` festgelegt (Version 0.6.9).
+`41cf61758f55e0e324c8ca4988237b62f929dbff` festgelegt (Version 0.6.9).
 Rust, Wayland, Mesa mit EGL/GBM und Software-Rendering, libinput und libseat
 mit systemd-logind sowie `x11-themes/xcursor-themes` werden vorher installiert. Der Build verwendet zwei Jobs,
 um den Speicherbedarf in der VM zu begrenzen.
