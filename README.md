@@ -113,7 +113,7 @@ Nützliche Optionen:
 Die Desktop-Konfiguration baut [Anvil](https://github.com/dme86/anvil) und
 `anvilctl` direkt in der Gentoo-VM mit `cargo build --release --locked`.
 Der Quellstand ist über `anvil_version` in `post_install.yml` auf Commit
-`b361ed8930c82091f7e269f18ed3ab8ba6956dd8` festgelegt (Version 0.6.9).
+`b4c723fb56df9152ca0b88f3fa2b8580c078af7c` festgelegt (Version 0.6.9).
 Rust, Wayland, Mesa mit EGL/GBM und Software-Rendering, libinput und libseat
 mit systemd-logind sowie `x11-themes/xcursor-themes` werden vorher installiert. Der Build verwendet zwei Jobs,
 um den Speicherbedarf in der VM zu begrenzen.
@@ -306,3 +306,21 @@ richtet den Startup-Eintrag ein, ohne andere Startup-Kommandos zu ersetzen.
 Neue Bilder werden beim nächsten Sitzungsstart berücksichtigt. Mit `git -C ~/.wallpapers pull --ff-only` in der VM lässt sich die
 Bildersammlung aktualisieren.
 Fehlen Bilder, beendet sich der Helfer ohne die Anmeldung zu blockieren.
+
+## Speicherverbrauch in ARM64-QEMU-Gästen
+
+Die Anvil-Oberfläche lädt Schriftkonturen mit FreeType erst bei Bedarf und
+behält nur begrenzte Glyphen-Caches. Nerd-Font-Symbole und Fontconfig-Fallbacks
+bleiben verfügbar; eine kleinere Schrift ist dafür nicht nötig.
+
+In erkannten ARM64-QEMU/KVM-Gästen setzt der Sitzungsstarter standardmäßig
+`GLIBC_TUNABLES=glibc.malloc.hugetlb=0`. Das vermeidet die in dieser VM gemessene
+Speicherverschwendung durch glibcs automatische Heap-Hugepages. Native Hardware
+behält ihre Standardeinstellung. Ein bereits gesetztes `GLIBC_TUNABLES` bleibt
+erhalten; mit `-e anvil_glibc_tunables=` lässt sich die Vorgabe deaktivieren.
+Die Einstellung wird auch an Programme vererbt, die aus der Sitzung starten.
+
+Im vergleichbaren Test sank Anvil von etwa 198 MiB auf 151 MiB durch die
+Schriftänderung und auf 103 MiB mit der VM-Einstellung. Ein direktes DRM-Szenario
+mit einem Testterminal lag bei 101 MiB und 54–58 Bildern/s ohne Renderfehler.
+Die Werte hängen von Treiber, Ausgängen, Fenstern und Arbeitslast ab.

@@ -22,8 +22,17 @@
     home_dir: "/home/{{ user_name }}"
 
     rst_version: "a12cd343cca8c38d586d59e216e1083938b737e7"
+    # Avoid oversized transparent heap pages in small ARM64 QEMU guests.
+    # Keep the native-hardware allocator default and allow an explicit override.
+    anvil_glibc_tunables: >-
+      {{ 'glibc.malloc.hugetlb=0'
+         if (ansible_facts.architecture | default('')) in ['aarch64', 'arm64']
+         and (ansible_facts.virtualization_role | default('')) == 'guest'
+         and (ansible_facts.virtualization_type | default('')) in ['kvm', 'qemu']
+         else '' }}
+
     tuigreet_version: "4e3a0054a51ab35242d63d5b47e503d314808c52"
-    anvil_version: "b361ed8930c82091f7e269f18ed3ab8ba6956dd8"
+    anvil_version: "b4c723fb56df9152ca0b88f3fa2b8580c078af7c"
 
     repos:
       - { repo: "https://github.com/dme86/.wallpapers.git", dest: "{{ home_dir }}/.wallpapers" }
@@ -44,6 +53,7 @@
       - sys-auth/seatd
       - sys-apps/dbus
       - media-libs/mesa
+      - media-libs/freetype
       - x11-libs/libdrm
       - x11-libs/libxkbcommon
       - x11-misc/xkeyboard-config
@@ -561,6 +571,9 @@
           export XDG_CURRENT_DESKTOP=anvil
           export XDG_SESSION_DESKTOP=anvil
           export LIBSEAT_BACKEND=logind
+          {% if anvil_glibc_tunables %}
+          export GLIBC_TUNABLES="${GLIBC_TUNABLES:-{{ anvil_glibc_tunables }}}"
+          {% endif %}
           exec dbus-run-session -- /usr/local/bin/anvil
 
     - name: Ensure Wayland session directory exists
