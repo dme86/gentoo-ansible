@@ -32,7 +32,7 @@
          else '' }}
 
     tuigreet_version: "4e3a0054a51ab35242d63d5b47e503d314808c52"
-    anvil_version: "41cf61758f55e0e324c8ca4988237b62f929dbff"
+    anvil_version: "707ca89e2f2897f4735feb35229e836f439b761f"
 
     repos:
       - { repo: "https://github.com/dme86/.wallpapers.git", dest: "{{ home_dir }}/.wallpapers" }
