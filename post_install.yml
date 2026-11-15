@@ -23,7 +23,7 @@
 
     rst_version: "a12cd343cca8c38d586d59e216e1083938b737e7"
     tuigreet_version: "4e3a0054a51ab35242d63d5b47e503d314808c52"
-    anvil_version: "66b20753830bbaaec0d60c83f9e7fad11a6ef1f7"
+    anvil_version: "b361ed8930c82091f7e269f18ed3ab8ba6956dd8"
 
     repos:
       - { repo: "https://github.com/dme86/.wallpapers.git", dest: "{{ home_dir }}/.wallpapers" }
