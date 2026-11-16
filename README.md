@@ -112,9 +112,9 @@ Nützliche Optionen:
 
 Die Desktop-Konfiguration baut [Anvil](https://github.com/dme86/anvil) und
 `anvilctl` direkt in der Gentoo-VM mit `cargo build --release --locked`.
-Der Quellstand ist über `anvil_version` in `post_install.yml` auf Commit
-`fe97d4cb428d63671e140f2d69c3e4ff92af1208` festgelegt (Version 0.7.0 mit
-Neofetch-Integration). Der Verweis berücksichtigt die bereinigte Anvil-Historie.
+Der Quellstand ist über `anvil_version` in `post_install.yml` auf einen
+reproduzierbaren Commit festgelegt. Die VM-Zwischenablage benötigt Anvils native
+Wayland-Data-Control-Unterstützung; XWayland ist dafür nicht erforderlich.
 
 Die Nachinstallation richtet außerdem Neofetch so ein, dass es eine Anvil-Sitzung
 korrekt als `WM: Anvil` erkennt. Vorhandene Einstellungen bleiben erhalten; die
@@ -128,7 +128,28 @@ Wayland, Anvil und unser Terminal [rst](https://github.com/dme86/rst) werden
 bei `make install` standardmäßig installiert. rst wird ebenfalls mit
 `cargo build --release --locked` gebaut und als `/usr/local/bin/rst` installiert;
 `rst_version` legt den Quellstand auf Commit
-`a12cd343cca8c38d586d59e216e1083938b737e7` fest.
+`0e80ddd948cf0026691d8d7b957a4f0755eb64e0` fest.
+
+In erkannten QEMU-/KVM-Gästen installiert die Nachinstallation außerdem
+[Paprika v0.2.1](https://github.com/thelicato/paprika-vdagent/tree/c65de8829ad126997f868c3cab9c00d6dab90023)
+am festgelegten Commit `c65de8829ad126997f868c3cab9c00d6dab90023` mit
+`cargo build --release --locked` und `gui-apps/wl-clipboard` zur Diagnose.
+Auf nativer Hardware bleibt diese Integration standardmäßig deaktiviert.
+
+Für QEMUs nativen Clipboard-Kanal kommt zusätzlich der eng begrenzte, überprüfte
+Patch [`patches/paprika-native-qemu.patch`](patches/paprika-native-qemu.patch)
+zum Einsatz. Er lässt QEMU den Capability-Handshake beginnen und sendet die
+Antwort vor der ersten Clipboard-Ankündigung. Der gepinnte Upstream-Checkout
+bleibt unverändert: Ansible wendet den Patch in einem separaten Git-Worktree
+unter `~/.cache/anvil-vm` an, dessen Name Quellcommit und Patch-Hash enthält.
+Ein privater Cargo-Cache bleibt vom normalen Upstream-Build getrennt; Cargo
+prüft bei jeder Nachinstallation den tatsächlich gewählten Quellstand.
+Der Patch korrigiert außerdem die Reihenfolge wiederholter Clipboard-Wechsel
+zwischen Host und Gast. Details und Regressionstests stehen in
+[`patches/README.md`](patches/README.md).
+`vm_clipboard_native_qemu=true` aktiviert diesen Handshake über
+`PAPRIKA_VDAGENT_QEMU_NATIVE=1` im Benutzerdienst. Mit `false` bleibt die
+ursprüngliche, vom Gast begonnene SPICE-Aushandlung erhalten.
 
 Anvil bringt Leiste, Launcher und Fensterübersicht mit. rst ist das
 Standardterminal. Fensterabstände sind standardmäßig deaktiviert:
@@ -172,18 +193,108 @@ wird dort bewusst abgeschaltet, damit nur ein Login-Prompt angezeigt wird.
 `Ctrl`+`Alt`+`G` gibt einen gefangenen Mauszeiger frei. Die VM wird im Gast mit
 `poweroff` sauber beendet.
 
-UTM kann weiterhin als Runner verwendet werden. Die bisherige X11-Integration
-über `spice-vdagent`, `xrandr` und `feh` gilt für diese native Wayland-Session
-nicht. Gemeinsame Zwischenablage und automatische Anpassung an die Fenstergröße
-sind damit nicht zugesichert. Die DRM-/EGL-Ausgabe muss auf dem jeweiligen
-QEMU-/UTM-Grafikgerät praktisch geprüft werden; ein erfolgreicher Build und
-SSH-Test allein bestätigen noch keinen funktionierenden Desktop.
+Unter macOS verwendet der Starter `-display cocoa,zoom-to-fit=on`. Zoom To Fit
+ermöglicht Größenänderungen des nativen QEMU-Fensters. QEMU meldet die neue
+Displaygröße über VirtIO als bevorzugten DRM-Modus; Anvil folgt diesem Modus,
+solange für den Ausgang kein fester `mode` in `[[outputs]]` konfiguriert ist.
+`anvilctl output list` zeigt den aktuellen und bevorzugten Modus. Cocoa bindet
+das Fenster weiterhin an das aktuelle Seitenverhältnis; Breite und Höhe lassen
+sich damit nicht beliebig unabhängig voneinander ziehen. `QEMU_DISPLAY` kann
+die Display-Einstellung ausdrücklich überschreiben.
+
+Der Starter richtet standardmäßig den QEMU-Clipboard-Kanal `qemu-vdagent` mit
+dem VirtIO-Port `com.redhat.spice.0` ein. Paprika verbindet ihn innerhalb der
+angemeldeten Anvil-Sitzung mit der nativen Wayland-Zwischenablage über Data
+Control. Es läuft als Benutzer, ohne `spice-vdagentd` und ohne XWayland.
+Die Port-Regel erlaubt nur root und der Gruppe des Desktop-Benutzers Zugriff
+(`0660`). Vorhandene SPICE-Standarddienste werden maskiert; manuell laufende
+`spice-vdagent`-Prozesse müssen ebenfalls beendet werden.
+
+Diese Host-Brücke überträgt **UTF-8-Text**. Clipboard-Bilder werden nicht
+unterstützt; eingehende Dateitransfers sind für diese Integration deaktiviert.
+In rst **innerhalb der VM** kopiert `Ctrl`+`Shift`+`C` die Auswahl und
+`Ctrl`+`Shift`+`V` fügt Text ein. Die macOS-Tastenkürzel des Host-Terminals
+ersetzen diese Gast-Tastenkürzel nicht.
+
+`make run-graphical` startet nur das vorhandene Image mit den Host-Optionen.
+Die Gast-Pakete, Berechtigungen und Anvil-Autostart-Hilfe richtet dagegen
+`make post-install` über SSH in der bereits laufenden VM ein. Nach einer
+Aktualisierung von Anvil ist eine neue Anmeldung nötig, damit der neue
+Compositor samt Clipboard-Hilfe läuft. Eine bestehende VM daher zuerst starten,
+in einem zweiten Host-Terminal nachinstallieren und anschließend im Gast
+abmelden und neu anmelden.
+
+Die beiden Seiten lassen sich getrennt deaktivieren:
+
+```sh
+# Host: nächsten QEMU-Start ohne Clipboard-Kanal ausführen.
+VM_CLIPBOARD=0 make run-graphical
+
+# Gast: laufende Brücke stoppen und ihren Anvil-Autostart entfernen.
+make post-install ARGS="-e vm_clipboard_enabled=false"
+```
+
+`vm_clipboard_enabled=true` kann die Gast-Integration auch für andere
+SPICE-Runner ausdrücklich aktivieren. Für einen regulären SPICE-Server,
+beispielsweise in UTM, muss zusätzlich der native QEMU-Handshake deaktiviert
+werden:
+
+```sh
+make post-install ARGS="-e vm_clipboard_enabled=true -e vm_clipboard_native_qemu=false"
+```
+
+Die VM muss dabei über das vorhandene Ansible-Inventory erreichbar sein.
+`vm_clipboard_enabled=false` deinstalliert bereits vorhandene Pakete nicht.
+Fehlt dem Host-QEMU `qemu-vdagent`, erklärt der
+Starter den Fehler vor dem Boot; `VM_CLIPBOARD=0` erlaubt den Start ohne Brücke.
+
+Zur Diagnose diese Befehle **in einem Terminal der Anvil-Gastsitzung** ausführen:
+
+```sh
+paprika-vdagent --backend wayland doctor
+anvilctl output list
+DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus" \
+  systemctl --user status paprika-vdagent.service
+journalctl --user -u paprika-vdagent.service -b --no-pager
+```
+
+Der explizite Buspfad erreicht den systemd-Benutzermanager auch innerhalb der
+privaten D-Bus-Sitzung von `start-anvil`. Die Hilfe
+`/usr/local/bin/anvil-vm-clipboard` übernimmt beim Login ausschließlich die
+aktuellen Display-Einstellungen in ein privates Service-Drop-in und startet den
+Benutzerdienst neu. Bei Transportfehlern versucht der Dienst nach zwei Sekunden
+einen Neustart. Ohne Port oder erreichbaren Compositor beendet sich die Hilfe
+still; nach einer späteren Port-/Berechtigungsänderung kann sie innerhalb der
+Gastsitzung erneut aufgerufen werden. Ein Benutzerdienst folgt jeweils der
+zuletzt gestarteten grafischen Sitzung dieses Benutzers.
+
+Die Launcher- und Helfer-Regressionsprüfungen benötigen keine laufende VM und
+lesen keine Zwischenablage:
+
+```sh
+make test-vm-integration
+```
+
+Sie prüfen Startargumente und Sitzungsverwaltung. Ein tatsächlicher
+Fenstergrößenwechsel unter macOS wurde zusätzlich geprüft: Der bevorzugte und
+aktuelle Gast-Modus wechselte von `512x320` auf `768x480`; die rst-PTY passte sich
+von 50 Spalten und 14 Zeilen auf 75 Spalten und 22 Zeilen an. Textübertragung
+wurde bytegenau in beiden Richtungen geprüft: Unicode und mehrere Zeilen
+(66/91 Bytes) sowie größere Texte (159747/159770 Bytes). Nach absichtlichem
+Beenden des Dienstes verband er sich automatisch erneut; dieselben Tests
+bestanden danach wieder. Das bestätigt den Transport und die Wayland-Auswahl;
+weitere Testdetails und Grenzen stehen in
+[`docs/vm-integration-testing.md`](docs/vm-integration-testing.md).
 
 ## Vorhandenes Image in UTM verwenden
 
-UTM 4.7.5 oder neuer wird empfohlen; ältere Versionen haben einen bekannten
-SPICE-Fehler, durch den die dynamische Auflösung ausfallen kann. Die qcow2-Datei
-ist keine fertige `.utm`-VM und wird deshalb nicht über „Öffnen“ geladen:
+UTM bleibt ein optionaler Runner und ist für den nativen QEMU-Start oben nicht
+erforderlich. Die UTM-Variante wird mit diesem Integrationsstand nicht praktisch
+mitgeprüft. Dort muss der Runner einen passenden SPICE-Kanal bereitstellen;
+die QEMU-Startoptionen aus `qemu-graphical.sh` werden von UTM nicht übernommen.
+Die Gast-Einstellung `vm_clipboard_native_qemu=false` erhält die reguläre
+SPICE-Aushandlung, wie oben gezeigt.
+Die qcow2-Datei ist keine fertige `.utm`-VM und wird deshalb nicht über „Öffnen“ geladen:
 
 1. In UTM `+` → „Neue virtuelle Maschine“ → „Emulieren“ → „Andere“ wählen.
 2. Dieselbe Architektur wie der Build-Host auswählen (`ARM64/aarch64` oder
@@ -226,6 +337,8 @@ QEMU_EFI=/pfad/zu/edk2-aarch64-code.fd make install
 
 - `scripts/qemu-install.sh` orchestriert Download, QEMU, Ansible und Testboot.
 - `scripts/qemu-graphical.sh` startet ein vorhandenes Image mit Fensterkonsole.
+- `scripts/anvil-vm-clipboard.py` startet die Text-Clipboard-Brücke in der Anvil-Gastsitzung.
+- `scripts/test-qemu-graphical.py` und `scripts/test-vm-clipboard.py` prüfen die VM-Integration ohne VM-Start.
 - `install.yml` installiert das Basissystem aus dem laufenden Minimal-ISO.
 - `post_install.yml` enthält die optionale persönliche Nachkonfiguration.
 - `.qemu/live-console.log` und `.qemu/disk-console.log` helfen bei Bootfehlern.

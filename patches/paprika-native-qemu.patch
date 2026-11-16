@@ -1,0 +1,505 @@
+diff --git a/src/spice/protocol.rs b/src/spice/protocol.rs
+index 8c81c71..9b42502 100644
+--- a/src/spice/protocol.rs
++++ b/src/spice/protocol.rs
+@@ -81,7 +81,11 @@ pub(super) struct TransportState {
+     pub(super) clipboard_by_demand: bool,
+     pub(super) clipboard_selection: bool,
+     pub(super) clipboard_grab_serial: bool,
+-    pub(super) serial_counter: u32,
++    // Each selection has its own ordering, matching the SPICE host. The next
++    // guest serial is distinct from the last observed serial: equal host
++    // serials win an ownership tie and must not be compared against `next`.
++    pub(super) serial_counter: [u32; 2],
++    pub(super) last_serial: [Option<u32>; 2],
+ }
+ 
+ pub(super) fn parse_capabilities(data: &[u8]) -> Result<Vec<u32>> {
+@@ -100,7 +104,7 @@ pub(super) fn parse_clipboard_grab(
+     state: &Arc<Mutex<TransportState>>,
+     data: &[u8],
+ ) -> Result<(u8, Option<u32>, Vec<u32>)> {
+-    let guard = state.lock().map_err(|_| anyhow!("state mutex poisoned"))?;
++    let mut guard = state.lock().map_err(|_| anyhow!("state mutex poisoned"))?;
+     let mut offset = 0usize;
+     let mut selection = ClipboardSelection::Clipboard.spice_id();
+     let mut serial = None;
+@@ -112,24 +116,26 @@ pub(super) fn parse_clipboard_grab(
+         selection = data[0];
+         offset += 4;
+     }
++    let Some(selection_kind) = ClipboardSelection::from_spice_id(selection) else {
++        return Ok((selection, None, Vec::new()));
++    };
++    let index = selection_kind.spice_id() as usize;
+ 
+     if guard.clipboard_grab_serial {
+         if data.len() < offset + 4 {
+             bail!("clipboard GRAB missing serial field");
+         }
+         let value = le_u32(&data[offset..offset + 4]);
+-        if value < guard.serial_counter {
++        if guard.last_serial[index].is_some_and(|last| value < last) {
+             debug!(
+-                "discarding stale host clipboard GRAB serial {} < {}",
+-                value, guard.serial_counter
++                "discarding stale host clipboard GRAB serial {} < {:?}",
++                value, guard.last_serial[index]
+             );
+             return Ok((selection, Some(value), Vec::new()));
+         }
+         serial = Some(value);
+-        drop(guard);
+-
+-        let mut guard = state.lock().map_err(|_| anyhow!("state mutex poisoned"))?;
+-        guard.serial_counter = value;
++        guard.last_serial[index] = Some(value);
++        guard.serial_counter[index] = value.wrapping_add(1);
+         offset += 4;
+     }
+ 
+@@ -301,7 +307,8 @@ mod tests {
+             clipboard_by_demand: true,
+             clipboard_selection: selection,
+             clipboard_grab_serial: serial,
+-            serial_counter,
++            serial_counter: [serial_counter; 2],
++            last_serial: [Some(serial_counter); 2],
+         }))
+     }
+ 
+@@ -330,7 +337,8 @@ mod tests {
+         assert_eq!(selection, ClipboardSelection::Clipboard.spice_id());
+         assert_eq!(serial, Some(9));
+         assert_eq!(types, vec![VD_AGENT_CLIPBOARD_UTF8_TEXT]);
+-        assert_eq!(state.lock().unwrap().serial_counter, 9);
++        assert_eq!(state.lock().unwrap().serial_counter, [10, 4]);
++        assert_eq!(state.lock().unwrap().last_serial, [Some(9), Some(4)]);
+     }
+ 
+     #[test]
+@@ -362,7 +370,7 @@ mod tests {
+         assert_eq!(selection, ClipboardSelection::Clipboard.spice_id());
+         assert_eq!(serial, Some(3));
+         assert!(types.is_empty());
+-        assert_eq!(state.lock().unwrap().serial_counter, 10);
++        assert_eq!(state.lock().unwrap().serial_counter, [10; 2]);
+     }
+ 
+     #[test]
+diff --git a/src/spice/transport.rs b/src/spice/transport.rs
+index 5e6bf07..1fc859f 100644
+--- a/src/spice/transport.rs
++++ b/src/spice/transport.rs
+@@ -42,7 +42,9 @@ impl SpiceTransport {
+             .open(path)
+             .with_context(|| format!("failed to open virtio port {}", path.display()))?;
+ 
+-        Self::from_file(path, file, sender, max_text_bytes)
++        let qemu_native =
++            std::env::var_os("PAPRIKA_VDAGENT_QEMU_NATIVE").is_some_and(|value| value == "1");
++        Self::from_file(path, file, sender, max_text_bytes, qemu_native)
+     }
+ 
+     fn from_file(
+@@ -50,6 +52,7 @@ impl SpiceTransport {
+         file: File,
+         sender: Sender<TransportEvent>,
+         max_text_bytes: usize,
++        qemu_native: bool,
+     ) -> Result<Self> {
+         let reader = file
+             .try_clone()
+@@ -65,7 +68,13 @@ impl SpiceTransport {
+             max_text_bytes,
+         };
+ 
+-        transport.send_capabilities(true)?;
++        // QEMU's native qemu-vdagent backend initiates negotiation itself.
++        // An unsolicited announcement plus our reply to its request registers
++        // the peer twice; QEMU resets clipboard serials and closes the port.
++        // Real SPICE retains its existing guest-initiated handshake by default.
++        if !qemu_native {
++            transport.send_capabilities(true)?;
++        }
+ 
+         let reader_path = path.to_path_buf();
+         let event_sender = sender.clone();
+@@ -112,8 +121,10 @@ impl SpiceTransport {
+                 return Ok(false);
+             }
+ 
+-            let serial = state.serial_counter;
+-            state.serial_counter = state.serial_counter.wrapping_add(1);
++            let index = selection.spice_id() as usize;
++            let serial = state.serial_counter[index];
++            state.serial_counter[index] = serial.wrapping_add(1);
++            state.last_serial[index] = Some(serial);
+             (
+                 state.clipboard_selection,
+                 state.clipboard_grab_serial,
+@@ -269,6 +280,39 @@ impl SpiceTransport {
+     }
+ }
+ 
++fn negotiate_capabilities(
++    state: &Mutex<TransportState>,
++    caps: Vec<u32>,
++    reply: impl FnOnce() -> Result<()>,
++) -> Result<PeerCapabilities> {
++    // Initial snapshots and retry timers can send grabs without waiting for a
++    // PeerCapabilities event. Shared readiness must stay false until the host
++    // has our reply too, not merely until that event is emitted.
++    state
++        .lock()
++        .map_err(|_| anyhow!("state mutex poisoned"))?
++        .clipboard_by_demand = false;
++    reply()?;
++
++    let peer = PeerCapabilities {
++        clipboard_by_demand: has_capability(&caps, VD_AGENT_CAP_CLIPBOARD_BY_DEMAND),
++        clipboard_selection: has_capability(&caps, VD_AGENT_CAP_CLIPBOARD_SELECTION),
++        clipboard_grab_serial: has_capability(&caps, VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL),
++    };
++    let mut guard = state.lock().map_err(|_| anyhow!("state mutex poisoned"))?;
++    guard.peer_caps = caps;
++    guard.clipboard_by_demand = peer.clipboard_by_demand;
++    guard.clipboard_selection = peer.clipboard_selection;
++    guard.clipboard_grab_serial = peer.clipboard_grab_serial;
++    guard.serial_counter = [0; 2];
++    guard.last_serial = [None; 2];
++    debug!(
++        "peer capabilities: clipboard_by_demand={} selection={} grab_serial={}",
++        peer.clipboard_by_demand, peer.clipboard_selection, peer.clipboard_grab_serial
++    );
++    Ok(peer)
++}
++
+ fn reader_loop(
+     path: PathBuf,
+     mut reader: File,
+@@ -297,47 +341,24 @@ fn reader_loop(
+         match message_type {
+             VD_AGENT_ANNOUNCE_CAPABILITIES => {
+                 let caps = parse_capabilities(&data)?;
+-                {
+-                    let mut guard = state.lock().map_err(|_| anyhow!("state mutex poisoned"))?;
+-                    guard.peer_caps = caps.clone();
+-                    guard.clipboard_by_demand =
+-                        has_capability(&caps, VD_AGENT_CAP_CLIPBOARD_BY_DEMAND);
+-                    guard.clipboard_selection =
+-                        has_capability(&caps, VD_AGENT_CAP_CLIPBOARD_SELECTION);
+-                    guard.clipboard_grab_serial =
+-                        has_capability(&caps, VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL);
+-                    guard.serial_counter = 0;
+-
+-                    debug!(
+-                        "peer capabilities: clipboard_by_demand={} selection={} grab_serial={}",
+-                        guard.clipboard_by_demand,
+-                        guard.clipboard_selection,
+-                        guard.clipboard_grab_serial
+-                    );
+-                }
+-
+-                let peer = {
+-                    let guard = state.lock().map_err(|_| anyhow!("state mutex poisoned"))?;
+-                    PeerCapabilities {
+-                        clipboard_by_demand: guard.clipboard_by_demand,
+-                        clipboard_selection: guard.clipboard_selection,
+-                        clipboard_grab_serial: guard.clipboard_grab_serial,
++                let peer = negotiate_capabilities(&state, caps, || {
++                    if le_u32(&data[0..4]) != 0 {
++                        debug!("peer requested capability reply");
++                        let transport = SpiceTransport {
++                            path: path.clone(),
++                            writer: Arc::clone(&writer),
++                            state: Arc::clone(&state),
++                            max_text_bytes: usize::MAX,
++                        };
++                        transport.send_capabilities(false)?;
+                     }
+-                };
++                    Ok(())
++                })?;
++                // Do not let the main loop send its first clipboard grab
++                // before the host has received our capability reply.
+                 sender
+                     .send(TransportEvent::PeerCapabilities(peer))
+                     .context("failed to send PeerCapabilities event")?;
+-
+-                if le_u32(&data[0..4]) != 0 {
+-                    debug!("peer requested capability reply");
+-                    let transport = SpiceTransport {
+-                        path: path.clone(),
+-                        writer: Arc::clone(&writer),
+-                        state: Arc::clone(&state),
+-                        max_text_bytes: usize::MAX,
+-                    };
+-                    transport.send_capabilities(false)?;
+-                }
+             }
+             VD_AGENT_CLIPBOARD_GRAB => {
+                 let (selection_id, serial, types) = parse_clipboard_grab(&state, &data)?;
+@@ -451,7 +472,15 @@ mod tests {
+     }
+ 
+     fn connect() -> (SpiceTransport, UnixStream, mpsc::Receiver<TransportEvent>) {
+-        let (guest, mut host) = UnixStream::pair().unwrap();
++        let (transport, mut host, events) = connect_mode(false);
++        assert_eq!(read_message(&mut host).0, VD_AGENT_ANNOUNCE_CAPABILITIES);
++        (transport, host, events)
++    }
++
++    fn connect_mode(
++        qemu_native: bool,
++    ) -> (SpiceTransport, UnixStream, mpsc::Receiver<TransportEvent>) {
++        let (guest, host) = UnixStream::pair().unwrap();
+         host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+         host.set_write_timeout(Some(Duration::from_secs(2)))
+             .unwrap();
+@@ -461,12 +490,244 @@ mod tests {
+             File::from(OwnedFd::from(guest)),
+             sender,
+             1024,
++            qemu_native,
+         )
+         .unwrap();
+-        assert_eq!(read_message(&mut host).0, VD_AGENT_ANNOUNCE_CAPABILITIES);
+         (transport, host, events)
+     }
+ 
++    fn request_capabilities(host: &mut UnixStream) {
++        let caps = (1 << VD_AGENT_CAP_CLIPBOARD_BY_DEMAND)
++            | (1 << VD_AGENT_CAP_CLIPBOARD_SELECTION)
++            | (1 << VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL);
++        let mut payload = 1u32.to_le_bytes().to_vec();
++        payload.extend(u32::to_le_bytes(caps));
++        host.write_all(&encode_message_frame(
++            VD_AGENT_ANNOUNCE_CAPABILITIES,
++            &payload,
++        ))
++        .unwrap();
++    }
++
++    #[test]
++    fn native_qemu_replies_once_before_the_first_clipboard_grab() {
++        use std::io::Read;
++
++        let (transport, mut host, events) = connect_mode(true);
++        // The native backend, unlike a SPICE viewer, initiates negotiation.
++        // No guest announcement may precede its request.
++        host.set_nonblocking(true).unwrap();
++        assert_eq!(
++            host.read(&mut [0u8; 1]).unwrap_err().kind(),
++            io::ErrorKind::WouldBlock
++        );
++        host.set_nonblocking(false).unwrap();
++        request_capabilities(&mut host);
++        assert!(matches!(
++            events.recv_timeout(Duration::from_secs(2)).unwrap(),
++            TransportEvent::PeerCapabilities(_)
++        ));
++
++        // Act on readiness immediately, as the main loop does with a cached
++        // selection. The host must see our reply before that first grab.
++        assert!(
++            transport
++                .send_clipboard_grab_text(ClipboardSelection::Clipboard)
++                .unwrap()
++        );
++        let (kind, payload) = read_message(&mut host);
++        assert_eq!(kind, VD_AGENT_ANNOUNCE_CAPABILITIES);
++        assert_eq!(le_u32(&payload[..4]), 0, "reply must not request a reply");
++        assert!(has_capability(
++            &parse_capabilities(&payload).unwrap(),
++            VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL
++        ));
++        assert_eq!(read_message(&mut host).0, VD_AGENT_CLIPBOARD_GRAB);
++
++        // Exercise actual clipboard traffic after negotiation, rather than
++        // accepting a connection that only managed to exchange capabilities.
++        let mut request = selection_prefix(ClipboardSelection::Clipboard).to_vec();
++        request.extend(VD_AGENT_CLIPBOARD_UTF8_TEXT.to_le_bytes());
++        host.write_all(&encode_message_frame(VD_AGENT_CLIPBOARD_REQUEST, &request))
++            .unwrap();
++        assert!(matches!(
++            events.recv_timeout(Duration::from_secs(2)).unwrap(),
++            TransportEvent::HostRequest {
++                selection: ClipboardSelection::Clipboard,
++                ..
++            }
++        ));
++        assert!(
++            transport
++                .send_clipboard_text(
++                    ClipboardSelection::Clipboard,
++                    "native QEMU: 界\nsecond line"
++                )
++                .unwrap()
++        );
++        let (kind, payload) = read_message(&mut host);
++        assert_eq!(kind, VD_AGENT_CLIPBOARD);
++        assert_eq!(&payload[8..], "native QEMU: 界\nsecond line".as_bytes());
++    }
++
++    #[test]
++    fn qemu_serial_model_accepts_alternating_owners_per_selection() {
++        let (transport, mut host, events) = connect_mode(true);
++        request_capabilities(&mut host);
++        assert!(matches!(
++            events.recv_timeout(Duration::from_secs(2)).unwrap(),
++            TransportEvent::PeerCapabilities(_)
++        ));
++        assert_eq!(read_message(&mut host).0, VD_AGENT_ANNOUNCE_CAPABILITIES);
++
++        // Model QEMU 10.2.4 independently: a host grab sends last_serial++,
++        // while a guest grab is accepted iff serial >= last_serial, then sets
++        // last_serial to that value. The host therefore wins equal-serial
++        // ownership races. Clipboard and primary have independent counters.
++        let mut host_serial = [0u32; 2];
++        for selection in [
++            ClipboardSelection::Clipboard,
++            ClipboardSelection::Clipboard,
++            ClipboardSelection::Primary,
++            ClipboardSelection::Clipboard,
++            ClipboardSelection::Primary,
++        ] {
++            let index = selection.spice_id() as usize;
++            let serial = host_serial[index];
++            host_serial[index] = serial.wrapping_add(1);
++            let mut payload = selection_prefix(selection).to_vec();
++            payload.extend(serial.to_le_bytes());
++            payload.extend(VD_AGENT_CLIPBOARD_UTF8_TEXT.to_le_bytes());
++            host.write_all(&encode_message_frame(VD_AGENT_CLIPBOARD_GRAB, &payload))
++                .unwrap();
++            match events.recv_timeout(Duration::from_secs(2)).unwrap() {
++                TransportEvent::HostGrab {
++                    selection: actual,
++                    serial: actual_serial,
++                    types,
++                } => {
++                    assert_eq!(actual, selection);
++                    assert_eq!(actual_serial, Some(serial));
++                    assert_eq!(
++                        types,
++                        vec![VD_AGENT_CLIPBOARD_UTF8_TEXT],
++                        "host grab, including an equal-serial grab, must not be discarded"
++                    );
++                }
++                other => panic!("expected host grab, got {other:?}"),
++            }
++
++            assert!(transport.send_clipboard_grab_text(selection).unwrap());
++            let (kind, payload) = read_message(&mut host);
++            assert_eq!(kind, VD_AGENT_CLIPBOARD_GRAB);
++            assert_eq!(payload[0], selection.spice_id());
++            let guest_serial = le_u32(&payload[4..8]);
++            assert!(
++                guest_serial >= host_serial[index],
++                "QEMU would discard guest {selection} grab {guest_serial} < {}",
++                host_serial[index]
++            );
++            host_serial[index] = guest_serial;
++        }
++
++        // Keep advancing when an accepted host serial itself reaches MAX.
++        // QEMU post-increments this to zero, so the next guest grab is zero.
++        {
++            let mut state = transport.state.lock().unwrap();
++            state.serial_counter[0] = u32::MAX;
++            state.last_serial[0] = Some(u32::MAX - 1);
++        }
++        let mut payload = selection_prefix(ClipboardSelection::Clipboard).to_vec();
++        payload.extend(u32::MAX.to_le_bytes());
++        payload.extend(VD_AGENT_CLIPBOARD_UTF8_TEXT.to_le_bytes());
++        host.write_all(&encode_message_frame(VD_AGENT_CLIPBOARD_GRAB, &payload))
++            .unwrap();
++        assert!(matches!(
++            events.recv_timeout(Duration::from_secs(2)).unwrap(),
++            TransportEvent::HostGrab { serial: Some(u32::MAX), types, .. }
++                if types == [VD_AGENT_CLIPBOARD_UTF8_TEXT]
++        ));
++        assert!(
++            transport
++                .send_clipboard_grab_text(ClipboardSelection::Clipboard)
++                .unwrap()
++        );
++        let (kind, payload) = read_message(&mut host);
++        assert_eq!(kind, VD_AGENT_CLIPBOARD_GRAB);
++        assert_eq!(le_u32(&payload[4..8]), 0);
++    }
++
++    #[test]
++    fn initial_snapshot_defers_grab_while_capability_reply_is_blocked() {
++        let (transport, mut host, _events) = connect_mode(true);
++        let responder = SpiceTransport {
++            path: transport.path.clone(),
++            writer: Arc::clone(&transport.writer),
++            state: Arc::clone(&transport.state),
++            max_text_bytes: 1024,
++        };
++        let (reply_started, wait_for_reply) = mpsc::channel();
++        let (resume_reply, reply_resumed) = mpsc::channel();
++        let negotiation = thread::spawn(move || {
++            negotiate_capabilities(
++                &responder.state,
++                vec![1 << VD_AGENT_CAP_CLIPBOARD_BY_DEMAND],
++                || {
++                    reply_started.send(()).unwrap();
++                    reply_resumed.recv_timeout(Duration::from_secs(2)).unwrap();
++                    responder.send_capabilities(false)
++                },
++            )
++            .unwrap()
++        });
++        wait_for_reply.recv_timeout(Duration::from_secs(2)).unwrap();
++        // The main loop's initial snapshot does not wait for the readiness
++        // event. This call must defer without waiting on the blocked reply.
++        assert!(
++            !transport
++                .send_clipboard_grab_text(ClipboardSelection::Clipboard)
++                .unwrap()
++        );
++        resume_reply.send(()).unwrap();
++        assert!(negotiation.join().unwrap().clipboard_by_demand);
++        assert!(
++            transport
++                .send_clipboard_grab_text(ClipboardSelection::Clipboard)
++                .unwrap()
++        );
++        assert_eq!(read_message(&mut host).0, VD_AGENT_ANNOUNCE_CAPABILITIES);
++        assert_eq!(read_message(&mut host).0, VD_AGENT_CLIPBOARD_GRAB);
++    }
++
++    #[test]
++    fn native_qemu_mock_reproduces_default_double_announcement_disconnect() {
++        let (_transport, mut host, events) = connect_mode(false);
++        request_capabilities(&mut host);
++        let (kind, payload) = read_message(&mut host);
++        assert_eq!(kind, VD_AGENT_ANNOUNCE_CAPABILITIES);
++        assert_eq!(
++            le_u32(&payload[..4]),
++            1,
++            "default SPICE initiation is preserved"
++        );
++        let (kind, payload) = read_message(&mut host);
++        assert_eq!(kind, VD_AGENT_ANNOUNCE_CAPABILITIES);
++        assert_eq!(le_u32(&payload[..4]), 0);
++
++        // qemu-vdagent resets serials when capabilities arrive again after
++        // its clipboard peer was registered. Its own reset notification then
++        // closes the channel. This is a transport EOF, not a SPICE message.
++        host.shutdown(Shutdown::Both).unwrap();
++        assert!(matches!(
++            events.recv_timeout(Duration::from_secs(2)).unwrap(),
++            TransportEvent::PeerCapabilities(_)
++        ));
++        assert!(matches!(
++            events.recv_timeout(Duration::from_secs(2)).unwrap(),
++            TransportEvent::Disconnected(_)
++        ));
++    }
++
+     fn announce(host: &mut UnixStream, events: &mpsc::Receiver<TransportEvent>, caps: u32) {
+         let mut payload = 0u32.to_le_bytes().to_vec();
+         payload.extend(caps.to_le_bytes());

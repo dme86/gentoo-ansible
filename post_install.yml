@@ -21,7 +21,16 @@
     user_password: dan
     home_dir: "/home/{{ user_name }}"
 
-    rst_version: "a12cd343cca8c38d586d59e216e1083938b737e7"
+    rst_version: "0e80ddd948cf0026691d8d7b957a4f0755eb64e0"
+    # Install a session-owned clipboard bridge only in QEMU guests by default.
+    # An explicit -e vm_clipboard_enabled=true also supports other SPICE runners.
+    vm_clipboard_enabled: >-
+      {{ (ansible_facts.virtualization_role | default('')) == 'guest'
+         and (ansible_facts.virtualization_type | default('')) in ['kvm', 'qemu'] }}
+    paprika_vdagent_version: "c65de8829ad126997f868c3cab9c00d6dab90023"
+    # Cocoa's built-in qemu-vdagent starts the capabilities exchange itself.
+    # Set false for a runner backed by a regular SPICE server, such as UTM.
+    vm_clipboard_native_qemu: true
     # Avoid oversized transparent heap pages in small ARM64 QEMU guests.
     # Keep the native-hardware allocator default and allow an explicit override.
     anvil_glibc_tunables: >-
@@ -32,7 +41,7 @@
          else '' }}
 
     tuigreet_version: "4e3a0054a51ab35242d63d5b47e503d314808c52"
-    anvil_version: "fe97d4cb428d63671e140f2d69c3e4ff92af1208"
+    anvil_version: "0fd22bc41071a5918fcfd164b3753ff2a9a4a25f"
 
     repos:
       - { repo: "https://github.com/dme86/.wallpapers.git", dest: "{{ home_dir }}/.wallpapers" }
@@ -114,7 +123,7 @@
 
     - name: Query installed stable packages
       command: "portageq has_version / {{ item }}"
-      loop: "{{ stable_packages }}"
+      loop: "{{ stable_packages + (['gui-apps/wl-clipboard'] if vm_clipboard_enabled | bool else []) }}"
       register: stable_pkg_check
       changed_when: false
       failed_when: false
@@ -440,6 +449,237 @@
         group: root
         mode: '0755'
 
+    - name: Check out the pinned Paprika clipboard agent
+      git:
+        repo: https://github.com/thelicato/paprika-vdagent.git
+        dest: "{{ home_dir }}/.local/src/paprika-vdagent"
+        version: "{{ paprika_vdagent_version }}"
+        update: true
+      become_user: "{{ user_name }}"
+      register: paprika_checkout
+      when: vm_clipboard_enabled | bool
+
+    - name: Select the pinned clipboard build with its compatibility patch
+      set_fact:
+        paprika_build_dir: >-
+          {{ home_dir }}/.cache/anvil-vm/paprika-{{ paprika_vdagent_version }}-{{
+             lookup('file', playbook_dir + '/patches/paprika-native-qemu.patch') | hash('sha256') }}
+        paprika_target_dir: "{{ home_dir }}/.cache/anvil-vm/cargo-target"
+      when: vm_clipboard_enabled | bool
+
+    - name: Ensure the private clipboard build directory exists
+      file:
+        path: "{{ home_dir }}/.cache/anvil-vm"
+        state: directory
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0755'
+      when: vm_clipboard_enabled | bool
+
+    - name: Prepare an isolated clipboard build without modifying the source checkout
+      command:
+        argv:
+          - git
+          - worktree
+          - add
+          - --detach
+          - "{{ paprika_build_dir }}"
+          - "{{ paprika_vdagent_version }}"
+      args:
+        chdir: "{{ home_dir }}/.local/src/paprika-vdagent"
+        creates: "{{ paprika_build_dir }}/.git"
+      become_user: "{{ user_name }}"
+      when: vm_clipboard_enabled | bool
+
+    - name: Copy the reviewed native QEMU compatibility patch
+      copy:
+        src: "{{ playbook_dir }}/patches/paprika-native-qemu.patch"
+        dest: "{{ paprika_build_dir }}/anvil-native-qemu.patch"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0644'
+      when: vm_clipboard_enabled | bool
+
+    - name: Apply the native QEMU clipboard handshake compatibility patch
+      command:
+        argv:
+          - python3
+          - -c
+          - |
+            import pathlib, subprocess, sys
+            patch = sys.argv[1]
+            applied = subprocess.run(
+                ['git', 'apply', '--reverse', '--check', patch],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode == 0
+            if not applied:
+                subprocess.run(['git', 'apply', patch], check=True)
+            pathlib.Path('.anvil-native-qemu-patched').touch()
+          - "{{ paprika_build_dir }}/anvil-native-qemu.patch"
+      args:
+        chdir: "{{ paprika_build_dir }}"
+        creates: "{{ paprika_build_dir }}/.anvil-native-qemu-patched"
+      become_user: "{{ user_name }}"
+      register: paprika_qemu_patch
+      when: vm_clipboard_enabled | bool
+
+    - name: Build the pinned Paprika clipboard agent
+      command: cargo build --release --locked
+      args:
+        chdir: "{{ paprika_build_dir }}"
+      environment:
+        CARGO_BUILD_JOBS: "2"
+        CARGO_TARGET_DIR: "{{ paprika_target_dir }}"
+      become_user: "{{ user_name }}"
+      register: paprika_compilation
+      changed_when: "'Compiling ' in paprika_compilation.stderr"
+      when: vm_clipboard_enabled | bool
+
+    - name: Install the Paprika clipboard agent
+      copy:
+        src: "{{ paprika_target_dir }}/release/paprika-vdagent"
+        dest: /usr/local/bin/paprika-vdagent
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0755'
+      when: vm_clipboard_enabled | bool
+
+    - name: Install the Anvil VM clipboard session helper
+      copy:
+        src: "{{ playbook_dir }}/scripts/anvil-vm-clipboard.py"
+        dest: /usr/local/bin/anvil-vm-clipboard
+        owner: root
+        group: root
+        mode: '0755'
+      when: vm_clipboard_enabled | bool
+
+    - name: Ensure the systemd user unit directory exists
+      file:
+        path: /etc/systemd/user
+        state: directory
+        mode: '0755'
+      when: vm_clipboard_enabled | bool
+
+    - name: Install the session-started VM clipboard user service
+      copy:
+        dest: /etc/systemd/user/paprika-vdagent.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Started only by Anvil's session helper; never enabled for lingering users.
+          # Paprika session-start writes private display Environment= settings to
+          # %t/systemd/user/paprika-vdagent.service.d/90-paprika-session.conf
+          # and reloads the user manager before restarting this exact unit.
+          [Unit]
+          Description=Anvil VM text clipboard bridge
+          StartLimitIntervalSec=0
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/anvil-vm-clipboard --run
+          Restart=on-failure
+          RestartSec=2
+          Environment=RUST_LOG=warn
+          Environment=PAPRIKA_VDAGENT_QEMU_NATIVE={{ '1' if vm_clipboard_native_qemu | bool else '0' }}
+          UMask=0077
+          NoNewPrivileges=yes
+      when: vm_clipboard_enabled | bool
+
+    - name: Inspect an existing desktop user bus when clipboard integration is disabled
+      stat:
+        path: "/run/user/{{ user_state.uid }}/bus"
+      register: vm_clipboard_user_bus
+      when: not (vm_clipboard_enabled | bool)
+
+    - name: Inspect the managed clipboard unit when integration is disabled
+      stat:
+        path: /etc/systemd/user/paprika-vdagent.service
+      register: vm_clipboard_user_unit
+      when: not (vm_clipboard_enabled | bool)
+
+    - name: Stop the disabled clipboard bridge without starting a user manager
+      systemd_service:
+        name: paprika-vdagent.service
+        scope: user
+        state: stopped
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ user_state.uid }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ user_state.uid }}/bus"
+      become_user: "{{ user_name }}"
+      when:
+        - not (vm_clipboard_enabled | bool)
+        - vm_clipboard_user_bus.stat.issock | default(false)
+        - vm_clipboard_user_unit.stat.exists | default(false)
+
+    - name: Ensure the udev rules directory exists
+      file:
+        path: /etc/udev/rules.d
+        state: directory
+        mode: '0755'
+
+    - name: Ensure the private clipboard access group exists
+      group:
+        name: "{{ user_name }}"
+        state: present
+      when: vm_clipboard_enabled | bool
+
+    - name: Grant the desktop user membership in its clipboard group
+      user:
+        name: "{{ user_name }}"
+        groups: "{{ user_name }}"
+        append: true
+      when: vm_clipboard_enabled | bool
+
+    - name: Limit the clipboard port to root and the desktop user's group
+      copy:
+        dest: /etc/udev/rules.d/99-anvil-vm-clipboard.rules
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Only the SPICE clipboard channel; never grant access to other virtio ports.
+          SUBSYSTEM=="virtio-ports", ATTR{name}=="com.redhat.spice.0", OWNER="root", GROUP="{{ user_name }}", MODE="0660"
+      register: vm_clipboard_rule
+      when: vm_clipboard_enabled | bool
+
+    - name: Remove the clipboard port rule when integration is disabled
+      file:
+        path: /etc/udev/rules.d/99-anvil-vm-clipboard.rules
+        state: absent
+      register: vm_clipboard_rule_removed
+      when: not (vm_clipboard_enabled | bool)
+
+    - name: Reload udev after changing the clipboard port rule
+      command: udevadm control --reload-rules
+      when: vm_clipboard_rule.changed or vm_clipboard_rule_removed.changed
+      changed_when: true
+
+    - name: Apply clipboard permissions only to the named SPICE port
+      command: udevadm trigger --action=change --subsystem-match=virtio-ports --attr-match=name=com.redhat.spice.0
+      when: vm_clipboard_rule.changed or vm_clipboard_rule_removed.changed
+      changed_when: true
+
+    - name: Inspect installed stock SPICE daemon and socket units
+      command: systemctl list-unit-files --no-legend --no-pager spice-vdagentd.service spice-vdagentd.socket
+      register: stock_spice_units
+      changed_when: false
+      # systemd returns 1 with no diagnostics when neither unit is installed.
+      failed_when: >-
+        stock_spice_units.rc != 0 and
+        (stock_spice_units.rc != 1 or stock_spice_units.stderr | length > 0)
+      when: vm_clipboard_enabled | bool
+
+    - name: Stop and mask stock agents that would compete for the clipboard port
+      systemd_service:
+        name: "{{ item.split()[0] }}"
+        state: stopped
+        enabled: false
+        masked: true
+      loop: "{{ stock_spice_units.stdout_lines | default([]) }}"
+      when: vm_clipboard_enabled | bool
+
     - name: Check out the pinned Anvil source
       git:
         repo: https://github.com/dme86/anvil.git
@@ -553,18 +793,27 @@
       register: anvil_startup_commands
       changed_when: false
 
-    - name: Enable random wallpaper without replacing other startup commands
+    - name: Merge the wallpaper and optional clipboard helper into Anvil startup
+      set_fact:
+        anvil_managed_startup: >-
+          {{ ((anvil_startup_commands.stdout | from_json)
+              | reject('equalto', '/usr/local/bin/anvil-vm-clipboard') | list
+              + ['/usr/local/bin/anvil-wallpaper']
+              + (['/usr/local/bin/anvil-vm-clipboard'] if vm_clipboard_enabled | bool else []))
+             | unique | list }}
+
+    - name: Save Anvil startup without replacing other commands
       command:
         argv:
           - /usr/local/bin/anvilctl
           - config
           - set
           - general.startup
-          - "{{ ((anvil_startup_commands.stdout | from_json) + ['/usr/local/bin/anvil-wallpaper']) | unique | list | to_json }}"
+          - "{{ anvil_managed_startup | to_json }}"
       environment:
         HOME: "{{ home_dir }}"
       become_user: "{{ user_name }}"
-      when: "'/usr/local/bin/anvil-wallpaper' not in (anvil_startup_commands.stdout | from_json)"
+      when: anvil_managed_startup != (anvil_startup_commands.stdout | from_json)
       changed_when: true
 
     - name: Validate installed Anvil configuration

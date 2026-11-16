@@ -1,4 +1,4 @@
-.PHONY: ansible-deps install post-install run-graphical
+.PHONY: ansible-deps install post-install run-graphical test-vm-integration
 
 ansible-deps:
 	ansible-galaxy collection install -r requirements.yml
@@ -10,4 +10,8 @@ run-graphical:
 	./scripts/qemu-graphical.sh
 
 post-install: ansible-deps
-	ansible-playbook -i .qemu/inventory.ini post_install.yml -e post_install_target=gentoo_installed
+	ansible-playbook -i .qemu/inventory.ini post_install.yml -e post_install_target=gentoo_installed $(ARGS)
+
+test-vm-integration:
+	python3 scripts/test-qemu-graphical.py
+	python3 scripts/test-vm-clipboard.py
